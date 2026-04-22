@@ -44,6 +44,7 @@
 
 #include "Framework.hpp"
 #include "Mods.hpp"
+#include "DumperMode.hpp"
 #include "mods/UObjectHook.hpp"
 
 #include <bdshemu.h>
@@ -101,7 +102,19 @@ FFakeStereoRenderingHook::FFakeStereoRenderingHook() {
 }
 
 void FFakeStereoRenderingHook::on_frame() {
+    // Engine tick hook is always installed — plugins (including dumper-mode
+    // clients) need on_pre_engine_tick callbacks to submit game-thread work.
     attempt_hook_game_engine_tick();
+
+    // Render-pipeline hooks are the crash vector on some UE4.26.x forks
+    // (RoboQuest, Stellar Blade). Dumper mode skips them entirely so
+    // reflection-only plugins can run without triggering the
+    // FViewport::GetRenderTargetTexture PointerHook that tears down the
+    // render thread. See DumperMode.hpp.
+    if (uevr::is_dumper_mode()) {
+        return;
+    }
+
     attempt_hook_slate_thread();
     attempt_hook_fsceneview_constructor();
 
@@ -412,7 +425,11 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
         return result;
     }
 
-    hook->attempt_hooking();
+    // Dumper mode: skip render-pipeline hooks (see DumperMode.hpp). Engine
+    // tick dispatch below still runs, so plugins receive on_pre_engine_tick.
+    if (!uevr::is_dumper_mode()) {
+        hook->attempt_hooking();
+    }
 
     // Best place to run game thread jobs.
     GameThreadWorker::get().execute();
@@ -422,9 +439,15 @@ void* FFakeStereoRenderingHook::engine_tick_hook(sdk::UGameEngine* engine, float
         hook->m_ignore_next_engine_tick = false;
         return nullptr;
     }
-    
-    g_framework->enable_engine_thread();
-    g_framework->run_imgui_frame(false);
+
+    // Dumper mode: skip the imgui-frame + engine-thread-enable logic. ImGui
+    // needs a D3D device + swapchain that we never installed, and
+    // enable_engine_thread is a VR-only optimization. The mod fan-out below
+    // still runs, so plugins still get on_pre_engine_tick callbacks.
+    if (!uevr::is_dumper_mode()) {
+        g_framework->enable_engine_thread();
+        g_framework->run_imgui_frame(false);
+    }
 
     delta += hook->m_ignored_engine_delta;
     hook->m_ignored_engine_delta = 0.0f;
