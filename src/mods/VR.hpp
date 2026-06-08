@@ -62,7 +62,6 @@ public:
 
     int last_update_camera_data_frame_count = 0;
     void update_camera_data(int frame_count);
-    void get_camera_data();
 
     int get_vr_frame_count() { return m_frame_count; };
     bool is_left_eye() { return m_frame_count % 2 == m_left_eye_interval; };
@@ -70,24 +69,6 @@ public:
     bool is_fix_dlss() { return m_fix_upscalers_wobbling->value(); };
     bool is_enable_sharpening() { return m_enable_sharpening->value(); };
     float get_sharpness() { return m_sharpness->value(); };
-
-    bool is_force_fixed_foveated() { return m_force_fixed_foveated->value(); };
-    float get_foveated_periphery_blur() { return m_foveated_periphery_blurs->value(); };
-    float get_foveated_ratio() { return m_foveated_ratio->value(); };
-    float get_foveated_offset_x() { return m_foveated_offset_x->value(); };
-    float get_foveated_offset_y() { return m_foveated_offset_y->value(); };
-
-    float get_edge_scan_line_fix_range() { return m_edge_scan_line_fix_range->value(); };
-
-    FoveatedCompositeParams get_foveated_composite_params() {
-        FoveatedCompositeParams params{};
-        params.fFadeLeft = m_foveated_fade->value();
-        params.fFadeRight = m_foveated_fade->value();
-        params.fFadeTop = m_foveated_fade->value();
-        params.fFadeBottom = m_foveated_fade->value();
-        params.fRoundedRadius = m_foveated_rounded_radius->value();
-        return params;
-    }
 
 public:
     enum RenderingMethod {
@@ -474,11 +455,8 @@ public:
     bool is_using_afr() const {
         return m_rendering_method->value() == RenderingMethod::ALTERNATING || 
                m_rendering_method->value() == RenderingMethod::SYNCHRONIZED ||
+               m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP ||
                m_extreme_compat_mode->value() == true;
-    }
-
-    bool is_using_native_stereo() const {
-        return m_rendering_method->value() == RenderingMethod::NATIVE_STEREO && m_extreme_compat_mode->value() != true;
     }
 
     bool is_using_synchronized_afr() const {
@@ -617,7 +595,7 @@ public:
     }
 
     bool is_native_stereo_fix_enabled() const {
-        return m_native_stereo_fix->value() && is_using_native_stereo();
+        return m_native_stereo_fix->value() && !is_using_afr();
     }
 
     bool is_native_stereo_fix_same_pass_enabled() const {
@@ -983,20 +961,9 @@ private:
     const ModToggle::Ptr m_enable_ui_fix{ModToggle::create(generate_name("EnableUIFix"), true)};
     const ModToggle::Ptr m_enable_sharpening{ModToggle::create(generate_name("EnableSharpening"), true)};
     const ModToggle::Ptr m_fix_upscalers_wobbling{ModToggle::create(generate_name("UpscalersWobblingFix"), true)};
-    const ModToggle::Ptr m_disable_volumetric_fog{ModToggle::create(generate_name("DisableVolumetricFog"), true)};
-    const ModToggle::Ptr m_fix_item_inspection{ModToggle::create(generate_name("FixItemInspection"), true)};
     const ModSlider::Ptr m_sharpness{ModSlider::create(generate_name("Sharpness"), 0.0f, 1.0f, 0.6f)};
     const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("FramewarpDebug"), false)};
     const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("IgnoreMotionThreshold"), 1.0f, 100.0f, 2.5f)};
-    const ModToggle::Ptr m_enable_foveated_rendering{ModToggle::create(generate_name("EnableFoveatedRendering"), false)};
-    const ModToggle::Ptr m_force_fixed_foveated{ModToggle::create(generate_name("Force Fixed Foveated"), false)};
-    const ModSlider::Ptr m_foveated_ratio{ModSlider::create(generate_name("FovatedRatio"), 0.3333333333f, 1.0f, 0.5f)};
-    const ModSlider::Ptr m_foveated_periphery_blurs{ModSlider::create(generate_name("FoveatedPeripheryBlur"), 0.0f, 5.0f, 0.0f)};
-    const ModSlider::Ptr m_foveated_fade{ModSlider::create(generate_name("FovatedFade"), 0.0f, 1.0f, 0.1f)};
-    const ModSlider::Ptr m_foveated_rounded_radius{ModSlider::create(generate_name("FovatedRoundedRadius"), 0.0f, 1.0f, 0.0f)};
-    const ModSlider::Ptr m_foveated_offset_x{ModSlider::create(generate_name("FovatedOffsetX"), -1.0f, 1.0f, 0.05f)};
-    const ModSlider::Ptr m_foveated_offset_y{ModSlider::create(generate_name("FovatedOffsetY"), -1.0f, 1.0f, -0.05f)};
-    const ModSlider::Ptr m_edge_scan_line_fix_range{ModSlider::create(generate_name("EdgeScanLineFixRange"), 0.0f, 0.5f, 0.08f)};
     const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("FramewarpMode"),
         {
             "None",
@@ -1205,16 +1172,6 @@ public:
             *m_enable_sharpening,
             *m_sharpness,
             *m_fix_upscalers_wobbling,
-            *m_disable_volumetric_fog,
-            *m_fix_item_inspection,
-            *m_enable_foveated_rendering,
-            *m_force_fixed_foveated,
-            *m_foveated_ratio,
-            *m_foveated_fade,
-            *m_foveated_rounded_radius,
-            *m_foveated_offset_x,
-            *m_foveated_offset_y,
-            *m_edge_scan_line_fix_range,
         };
 
         add_components_vr();

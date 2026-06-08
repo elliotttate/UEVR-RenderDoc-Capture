@@ -16,9 +16,12 @@
 #include <../../directxtk12-src/Inc/GraphicsMemory.h>
 #include <../../directxtk12-src/Inc/SpriteBatch.h>
 #include <../../directxtk12-src/Inc/DescriptorHeap.h>
+#include <../../directxtk12-src/Src/d3dx12.h>
 
 #include "d3d12/CommandContext.hpp"
 #include "d3d12/TextureContext.hpp"
+
+#include "PDAFWPlugin.h"
 
 class VR;
 
@@ -221,7 +224,7 @@ private:
 
     uint32_t m_last_rendered_frame{0};
     bool m_force_reset{true};
-    bool m_last_native_stereo_state{false};
+    bool m_last_afr_state{false};
     bool m_submitted_left_eye{false};
 };
 } // namespace vrmod

@@ -1864,7 +1864,7 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
         }
     }
 
-    if (is_using_native_stereo()) {
+    if (!is_using_afr()) {
         const auto is_hzbo_frozen_by_cvm = m_cvar_manager != nullptr && m_cvar_manager->is_hzbo_frozen_and_enabled();
 
         // Forcefully disable r.HZBOcclusion, it doesn't work with native stereo mode (sometimes)
@@ -2386,7 +2386,7 @@ void VR::on_present() {
     m_present_thread_id = GetCurrentThreadId();
 
     utility::ScopeGuard _guard {[&]() {
-        if (is_using_native_stereo() || is_using_afw() || (m_render_frame_count + 1) % 2 == m_left_eye_interval) {
+        if (!is_using_afr() || is_using_afw() || (m_render_frame_count + 1) % 2 == m_left_eye_interval) {
             SetEvent(m_present_finished_event);
         }
 
@@ -2395,7 +2395,7 @@ void VR::on_present() {
 
     m_frame_count = get_runtime()->internal_render_frame_count;
 
-    if (is_using_native_stereo() || is_using_afw() || m_render_frame_count % 2 == m_left_eye_interval) {
+    if (!is_using_afr() || is_using_afw() || m_render_frame_count % 2 == m_left_eye_interval) {
         ResetEvent(m_present_finished_event);
     }
 
@@ -2428,7 +2428,6 @@ void VR::on_present() {
             }
 
             openvr->is_hmd_active = hmd_active;
-            openvr->is_hmd_active = true;
 
             // upon headset re-entry, reinitialize OpenVR
             if (openvr->is_hmd_active && !openvr->was_hmd_active) {
@@ -2453,10 +2452,9 @@ void VR::on_present() {
     const auto renderer = g_framework->get_renderer_type();
     vr::EVRCompositorError e = vr::EVRCompositorError::VRCompositorError_None;
 
-    // AFW just works because it's not AFR
     const auto is_left_eye_frame = is_using_afr() ? (m_render_frame_count % 2 == m_left_eye_interval) : true;
 
-    if (is_left_eye_frame && get_synchronize_stage() == VR::SynchronizeStage::LATE) {
+    if ((is_left_eye_frame || is_using_afw()) && get_synchronize_stage() == VR::SynchronizeStage::LATE) {
         const auto had_sync = runtime->got_first_sync;
         runtime->synchronize_frame();
 
@@ -2545,10 +2543,9 @@ void VR::on_post_present() {
 
     detect_controllers();
 
-    // AFW just works because it's not AFR
     const auto is_left_eye_frame = is_using_afr() ? (is_same_frame || (m_render_frame_count % 2 == m_left_eye_interval)) : true;
 
-    if (is_left_eye_frame) {
+    if ((is_left_eye_frame || is_using_afw())) {
         if (get_synchronize_stage() == VR::SynchronizeStage::VERY_LATE || !runtime->got_first_sync) {
             const auto had_sync = runtime->got_first_sync;
             runtime->synchronize_frame();
