@@ -23,15 +23,23 @@
 If you build `UEVRBackend.dll` yourself instead of using the release, two pieces
 are required so your build behaves like the shipped one:
 
-1. **The UESDK crash-fix is applied for you at configure time.** `UESDK` is
-   praydog's **private** submodule, so it can't be forked publicly to carry the
-   fix. Instead the CMake configure step applies
+1. **The UESDK crash-fix comes with the submodule.** The `UESDK` submodule
+   points at a private fork, `elliotttate/UESDK` @ `uevr-renderdoc-capture`,
+   which carries the fix as a real commit on top of upstream. `UESDK` is
+   praydog's **gated** SDK, so the fork is private too — you need access (same
+   as needing `praydog/UESDK` access to build upstream UEVR at all). **Already
+   have `praydog/UESDK` access but not the fork?** Repoint the submodule there:
+   ```
+   git config -f .gitmodules submodule.dependencies/submodules/UESDK.url git@github.com:praydog/UESDK.git
+   git submodule sync && git submodule update --init
+   ```
+   The build then auto-applies
    [`patches/UESDK-StereoStuff-renderdoc.patch`](patches/UESDK-StereoStuff-renderdoc.patch)
-   to your own UESDK checkout (see [`cmake/ApplyUESDKPatch.cmake`](cmake/ApplyUESDKPatch.cmake)) —
-   it's idempotent and only warns on upstream drift. You still need legitimate
-   `praydog/UESDK` access to build at all (same as upstream UEVR). Without this
-   fix, injecting under embedded RenderDoc **crashes** during stereo setup
-   (the `GetNativeResource` vtable probe rejects the RenderDoc-wrapped resource).
+   to your checkout at configure time (see
+   [`cmake/ApplyUESDKPatch.cmake`](cmake/ApplyUESDKPatch.cmake)) — idempotent,
+   warns-not-fails on drift. Without this fix, injecting under embedded RenderDoc
+   **crashes** during stereo setup (the `GetNativeResource` vtable probe rejects
+   the RenderDoc-wrapped resource).
 
 2. **Use the bundled `renderdoc.dll` — not a stock RenderDoc install.** The
    shipped DLL is a **custom RenderDoc fork**
