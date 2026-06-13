@@ -18,16 +18,17 @@ headset.
 ## ⏱️ TL;DR (the 60-second version)
 
 1. Download the release, unzip it somewhere (e.g. `C:\UEVR-RenderDoc`).
-2. Open **PowerShell** in that folder.
-3. Launch your game through the launcher:
+2. **Easiest:** drag your game's real exe onto **`Launch-Capture.bat`** (or edit
+   the `GAME_EXE` line in it and double-click). That runs the launcher for you.
+   Prefer the command line? Open **PowerShell** in that folder and run:
    ```powershell
    .\UEVRRenderDocLauncher.exe --exe "C:\Path\To\YourGame-Shipping.exe" --wait
    ```
-4. Once the game is rendering, take a capture:
+3. Once the game is rendering, take a capture:
    ```powershell
    .\Capture-RenderDoc.ps1
    ```
-5. Open the `.rdc` it prints out in **RenderDoc** (`qrenderdoc.exe`). Done. 🎉
+4. Open the `.rdc` it prints out in **RenderDoc** (`qrenderdoc.exe`). Done. 🎉
 
 The rest of this guide explains each step, plus VR and troubleshooting.
 
@@ -41,6 +42,7 @@ The rest of this guide explains each step, plus VR and troubleshooting.
 | `renderdoc.dll` | The RenderDoc runtime that does the actual capture. |
 | `openxr_loader.dll` | Needed for VR (OpenXR). Harmless for flat games. |
 | `openvr_api.dll` | Needed for VR via SteamVR/OpenVR. |
+| `Launch-Capture.bat` | **One-click launcher.** Drag your game's exe onto it, or edit `GAME_EXE` and double-click. Wraps `UEVRRenderDocLauncher.exe` for you. |
 | `UEVRRenderDocLauncher.exe` | **The easy button.** Launches your game with RenderDoc + UEVR already inside, before the game draws a single frame. |
 | `UEVRRenderDocSmoke.exe` | A tiny test app that draws a triangle — handy for confirming capture works without a real game. |
 | `Capture-RenderDoc.ps1` | Triggers one capture and tells you where the `.rdc` landed. |
@@ -72,16 +74,30 @@ the same folder it lives in.
 
 ### 2. Find your game's real executable
 
-Many games have a small launcher `.exe` that starts the *real* game in a
-different folder. You want the **big** shipping executable, usually here:
+The launcher **starts the exe you give it** — it does not attach to an
+already-running game. So you must point it at the process that actually renders,
+**not** a small launcher/redirector stub.
+
+Many games ship a tiny `.exe` at the install root (e.g. `MyGame.exe`, often only
+a few hundred KB) that just relaunches the *real* game in a subfolder. You want
+the **big** executable under `Binaries\Win64`:
 
 ```
 ...\<Game>\Binaries\Win64\<Game>-Win64-Shipping.exe
 ```
 
+> **Generic-target builds.** Some UE titles are built from the engine's generic
+> game target instead of a project-named one. There the real exe is named
+> **`UnrealGame-Win64-Shipping.exe`** (Shipping) or **`UnrealGame.exe`**
+> (Development) under `Engine\Binaries\Win64`, and the root `<Game>.exe` is just
+> a redirector stub — point `--exe` at the big `UnrealGame*-...exe`, **not** at
+> the stub. Telltale signs of these builds: `boost_*`, `tbb`, `python`, and a
+> `D3D12\` Agility-SDK subfolder next to the real exe.
+
 > **Tip:** Start the game normally, open Task Manager → Details, find the
 > process using the most memory, right-click → *Open file location*. That's the
-> exe you want.
+> exe you want. If injecting UEVR the normal way already works for you, the
+> process you inject into **is** the exe to pass to `--exe`.
 
 ### 3. Launch the game through the launcher
 
@@ -94,17 +110,33 @@ window here*) and run:
 
 - If the game needs to start from a specific folder, add `--cwd "C:\that\folder"`.
 - If the game needs command-line arguments, put them after `--`, e.g.
-  `... --exe "...\Game.exe" -- -dx12`.
+  `... --exe "...\Game.exe" -- -dx12`. (UE uses single-dash flags like `-dx12`.)
+
+> **Run it in PowerShell and watch the output.** The launcher prints exactly
+> what it's doing (`Created suspended process pid=…`, which DLLs it injected,
+> and whether it timed out). If the game "doesn't launch," that text tells you
+> why — see [Troubleshooting](#-troubleshooting).
 
 What the launcher does for you, in order:
 1. Starts the game **paused**.
 2. Injects `renderdoc.dll` (so RenderDoc wraps the graphics objects *from the
    very beginning* — this is what makes captures clean).
 3. Injects `UEVRBackend.dll`.
-4. Waits until UEVR says "I'm ready", then **unpauses** the game.
+4. Waits until UEVR says "I'm ready" (up to `--ready-timeout-ms`, default 30000),
+   then **unpauses** the game.
 
 You'll see the game start. Let it reach actual gameplay / a menu — anything
 that's drawing frames.
+
+> **If the game won't boot under the default path** (it closes immediately, or
+> the launcher reports a ready-event timeout), add **`--defer-backend-ms 8000`**.
+> This resumes the game with **only RenderDoc** resident, lets the game create
+> D3D12 itself, then injects UEVR ~8 s later. It skips the early D3D12 prehook
+> that some modular / D3D12-Agility-SDK titles don't tolerate, while still
+> getting RenderDoc in before any graphics objects exist:
+> ```powershell
+> .\UEVRRenderDocLauncher.exe --exe "...\UnrealGame-Win64-Shipping.exe" --cwd "...\StagedRoot" --defer-backend-ms 8000 --wait
+> ```
 
 ### 4. Take a capture
 
@@ -222,9 +254,37 @@ inject UEVR a different way:
 | `UEVR_RENDERDOC_TRACK_ACTIVE_PAIR=1` | Capture the exact game window/device instead of a guess. |
 | `UEVR_DISABLE_RENDERDOC_BOOTSTRAP=1` | Hard-off switch. |
 
+## 🎛️ Launcher flags
+
+| Flag | Meaning |
+|------|---------|
+| `--exe <path>` | The **real render exe** to launch (required). Not a redirector stub. |
+| `--cwd <dir>` | Working directory to start the game in (e.g. a staged-build root). |
+| `--args "..."` or `-- <args>` | Command-line args for the game (e.g. `-- -dx12`). |
+| `--wait` | Keep the launcher attached until the game exits. |
+| `--ready-timeout-ms <ms>` | How long to wait for UEVR's ready signal before giving up (default 30000). |
+| `--defer-backend-ms <ms>` | Resume with **only RenderDoc** first, then inject UEVR after this delay. Skips the early D3D12 prehook — use it when a game won't boot under the default path. |
+| `--backend-load-renderdoc` | Let `UEVRBackend.dll` load `renderdoc.dll` itself instead of pre-injecting it. |
+
 ---
 
 ## 🆘 Troubleshooting
+
+**The game never appears / it closes immediately / the launcher exits.**
+The launcher kills the game on purpose if any startup step fails. Run it in
+PowerShell and read the printed message:
+- `renderdoc.dll not found` / `UEVRBackend.dll not found` → you're running the
+  launcher from a folder that doesn't have those next to it. Keep all the
+  unzipped files together and run the launcher from that folder.
+- `Game executable not found` → fix the `--exe` path.
+- `Created suspended process pid=…` then `Remote LoadLibraryW failed` → injection
+  failed; try running the PowerShell window **as administrator**.
+- `Timed out waiting for UEVR ready event after 30000 ms` → UEVR's early D3D12
+  prehook stalled (common on modular / D3D12-Agility-SDK titles). Add
+  **`--defer-backend-ms 8000`** (see Step 3) to skip the prehook.
+- Nothing renders / wrong window → you targeted a **redirector stub** instead of
+  the real exe. Point `--exe` at the big `Binaries\Win64\…-Shipping.exe`
+  (or `UnrealGame-Win64-Shipping.exe`), not the small `<Game>.exe` at the root.
 
 **"No `.rdc` appeared."**
 - Make sure the game was actually drawing frames when you triggered.
@@ -244,7 +304,9 @@ inject UEVR a different way:
 ```
 %APPDATA%\UnrealVRMod\<GameExeName>\log.txt
 ```
-Search it for `RenderDoc` and `watcher` to see exactly what happened.
+`<GameExeName>` is the exe name without `.exe` (e.g. `UnrealGame-Win64-Shipping`).
+Search it for `RenderDoc`, `prehook`, `ready event`, and `capture_safe` to see
+exactly how far startup got.
 
 **The game crashes when going into VR with RenderDoc on.**
 - This build includes a fix for that (UEVR's stereo setup now understands
