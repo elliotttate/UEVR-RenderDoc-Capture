@@ -18,6 +18,32 @@
 
 ---
 
+## 🔨 Building from source (two reproducibility notes)
+
+If you build `UEVRBackend.dll` yourself instead of using the release, two pieces
+are required so your build behaves like the shipped one:
+
+1. **The UESDK crash-fix is applied for you at configure time.** `UESDK` is
+   praydog's **private** submodule, so it can't be forked publicly to carry the
+   fix. Instead the CMake configure step applies
+   [`patches/UESDK-StereoStuff-renderdoc.patch`](patches/UESDK-StereoStuff-renderdoc.patch)
+   to your own UESDK checkout (see [`cmake/ApplyUESDKPatch.cmake`](cmake/ApplyUESDKPatch.cmake)) —
+   it's idempotent and only warns on upstream drift. You still need legitimate
+   `praydog/UESDK` access to build at all (same as upstream UEVR). Without this
+   fix, injecting under embedded RenderDoc **crashes** during stereo setup
+   (the `GetNativeResource` vtable probe rejects the RenderDoc-wrapped resource).
+
+2. **Use the bundled `renderdoc.dll` — not a stock RenderDoc install.** The
+   shipped DLL is a **custom RenderDoc fork**
+   ([`elliotttate/renderdoc`](https://github.com/elliotttate/renderdoc)) with a
+   D3D12 driver fix: at the tier-3 descriptor-heap max it reserves RenderDoc's
+   patch descriptors *from within* the heap instead of writing past its end.
+   Stock RenderDoc lacks this, so large UE5 titles can corrupt the heap and the
+   **swapchain backbuffer freezes**. The custom DLL is shipped prebuilt in every
+   release; rebuild it from the fork only if you want to.
+
+---
+
 ![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
 
 Universal Unreal Engine VR Mod (4/5)
