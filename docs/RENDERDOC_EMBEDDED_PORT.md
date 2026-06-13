@@ -1,14 +1,15 @@
 # RenderDoc Embedded Port
 
-This document describes UEVRJ's embedded RenderDoc capture path: how it makes
+This document describes UEVR's embedded RenderDoc capture path: how it makes
 RenderDoc resident before the first D3D12/DXGI objects, how captures are
 triggered, and how to validate that the resulting `.rdc` opens in RenderDoc.
 
 ## Workspace
 
-- UEVR checkout: `E:\github\uevrj`
-- Branch: `ue57performance`
-- RenderDoc source: `E:\Github\renderdoc`
+- UEVR checkout: `E:\github\uevr`
+- Branch: `master` (published fork: `elliotttate/UEVR-RenderDoc-Capture`)
+- RenderDoc source: `E:\Github\renderdoc` (a custom RenderDoc build exporting
+  `RENDERDOC_UEVR_RefreshHooks`; only needed to *rebuild* `renderdoc.dll`)
 
 ## Current Integration Layer
 
@@ -23,15 +24,19 @@ The current fork has four pieces in place:
    so UEVR's first `GetProcAddress(D3D12CreateDevice)` resolves through
    RenderDoc's hook stack.
 
-`cmake/RenderDocFull.cmake` builds RenderDoc's own Visual Studio solution and
-targets the `DLL\renderdoc` project:
+`cmake/RenderDocFull.cmake` can build RenderDoc's own Visual Studio solution
+(the `DLL\renderdoc` project) via a `renderdoc_full` target. That target only
+exists when `UEVR_RENDERDOC_ALWAYS_BUILD=ON` (the option **defaults to `OFF`**):
 
 ```powershell
+cmake -S . -B build -DUEVR_RENDERDOC_ALWAYS_BUILD=ON ...
 cmake --build build --config Release --target renderdoc_full
 ```
 
-When the `uevr` target builds, it depends on `renderdoc_full` and copies the
-resulting `renderdoc.dll` beside `UEVRBackend.dll`. The target also prefers
+With `UEVR_RENDERDOC_ALWAYS_BUILD=ON`, the `uevr` target depends on
+`renderdoc_full` and copies the freshly built `renderdoc.dll` beside
+`UEVRBackend.dll`. With the default (`OFF`) it copies a **prebuilt**
+`renderdoc.dll` instead and never invokes MSBuild. Either way the build prefers
 RenderDoc's source-tree `renderdoc/api/app/renderdoc_app.h` over UEVR's older
 vendored copy.
 
@@ -41,8 +46,9 @@ Start/EndFrameCapture. `RenderDiagnosticsCAPI` and `Sn2RdCapture` both route
 through that service so they no longer maintain separate RenderDoc loaders or
 handwritten API structs.
 
-Late-loading `renderdoc.dll` is explicitly opt-in (`UEVR_LOAD_RENDERDOC_DLL=1`,
-`UEVR_SN2_RD_CAPTURE_LOAD_DLL=1`, or an explicit DLL path). Without that, the
+Late-loading `renderdoc.dll` is explicitly opt-in: set `UEVR_LOAD_RENDERDOC_DLL=1`,
+or point at a specific DLL with `UEVR_RENDERDOC_DLL=<path>` or
+`UEVR_SN2_RD_CAPTURE_DLL=<path>`. Without that, the
 service only uses a RenderDoc module that was already present in-process.
 The service records whether `d3d12.dll` or `dxgi.dll` were already loaded when
 RenderDoc was initialized. UEVR-loaded RenderDoc is considered capture-safe only
@@ -75,7 +81,7 @@ the exact-pair capture fails.
 The shared service now keeps a wrapper-ownership ledger for UEVR's first/current
 observed dummy objects and game Present objects. Status JSON reports whether
 the first observed Present device, swapchain, command queue, and command list
-look RenderDoc-wrapped. See `docs/RENDERDOC_1TO1_AUDIT.md`.
+look RenderDoc-wrapped.
 
 `UEVRRenderDocLauncher.exe` is built beside `UEVRBackend.dll`. It creates the
 game process suspended, injects RenderDoc first, injects UEVR second, sets the
@@ -124,6 +130,16 @@ The launcher has an explicit `--backend-load-renderdoc` mode where only
 `UEVRBackend.dll` is injected and UEVR loads RenderDoc while the process is still
 suspended. That mode can produce a valid `.rdc`, but the smoke app currently
 shows a teardown access violation, so it is not the default compatibility path.
+
+The launcher also has a `--defer-backend-ms <ms>` mode for titles that do not
+tolerate the early D3D12 prehook (observed on some modular / D3D12-Agility-SDK
+builds, where the prehook's dummy device or the suspended-process load chain
+stalls). It resumes the game with **only RenderDoc** resident, lets the game
+create D3D12 itself, then injects `UEVRBackend.dll` after the delay. This turns
+off the prehook (`UEVR_RENDERDOC_PREHOOK_D3D12=0`) and the ready-event wait, so
+RenderDoc is still resident before the first device but UEVR layers on slightly
+later — capture stays valid, at the cost of the strict before-first-device proof.
+
 Late injection into an already-running game remains degraded by design; no code
 can retroactively make RenderDoc own objects that were created before RenderDoc
 was present.
@@ -162,10 +178,10 @@ the raw runtime exports, so RenderDoc's serializer remains in the call chain.
 
 ## Setup And Capture
 
-Build UEVRJ and full RenderDoc:
+Build UEVR and full RenderDoc:
 
 ```powershell
-cd E:\github\uevrj
+cd E:\github\uevr
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
   -DUEVR_RENDERDOC_SOURCE_DIR=E:/Github/renderdoc
 cmake --build build --config Release --target uevr
@@ -184,8 +200,8 @@ Run the smoke validation:
 ```powershell
 powershell -ExecutionPolicy Bypass `
   -File tools\run_renderdoc_smoke_capture.ps1 `
-  -Launcher E:\Github\UEVRJ\build\bin\uevr\UEVRRenderDocLauncher.exe `
-  -Smoke E:\Github\UEVRJ\build\bin\uevr\UEVRRenderDocSmoke.exe `
+  -Launcher E:\Github\UEVR\build\bin\uevr\UEVRRenderDocLauncher.exe `
+  -Smoke E:\Github\UEVR\build\bin\uevr\UEVRRenderDocSmoke.exe `
   -SmokeSeconds 25 `
   -CaptureTimeoutSeconds 45 `
   -StartupDelaySeconds 7
@@ -194,12 +210,12 @@ powershell -ExecutionPolicy Bypass `
 Launch a game through the suspended launcher:
 
 ```powershell
-$launcher = "E:\Github\UEVRJ\build\bin\uevr\UEVRRenderDocLauncher.exe"
+$launcher = "E:\Github\UEVR\build\bin\uevr\UEVRRenderDocLauncher.exe"
 $game = "E:\Github\Subnautica 2\Subnautica2\Binaries\Win64\Subnautica2-Win64-Shipping.exe"
 $cwd = "E:\Github\Subnautica 2"
 $env:XR_RUNTIME_JSON = "E:\Github\OpenXR-Simulator\bin\openxr_simulator.json"
 
-& $launcher --exe $game --cwd $cwd --ready-timeout-ms 30000 -- --dx12
+& $launcher --exe $game --cwd $cwd --ready-timeout-ms 30000 -- -dx12
 ```
 
 Request and validate a capture from that running game:
@@ -270,7 +286,7 @@ then the wrapper arms the heavy path and requests the capture.
 `E:\Github\uevr-mcp` exposes the full host-side capture flow so an MCP agent can
 launch, capture, validate, and list captures without hand-running PowerShell:
 
-- `uevr_renderdoc_paths` resolves UEVRJ, RenderDoc, launcher, backend, smoke,
+- `uevr_renderdoc_paths` resolves UEVR, RenderDoc, launcher, backend, smoke,
   `renderdoc.dll`, `renderdoccmd.exe`, and the sentinel path.
 - `uevr_renderdoc_launch_game` launches a target through
   `UEVRRenderDocLauncher.exe`.
@@ -289,11 +305,11 @@ Example MCP call shape:
   "arguments": {
     "gameExe": "E:\\Github\\Subnautica 2\\Subnautica2\\Binaries\\Win64\\Subnautica2-Win64-Shipping.exe",
     "cwd": "E:\\Github\\Subnautica 2",
-    "gameArgs": "--dx12",
+    "gameArgs": "-dx12",
     "xrRuntimeJson": "E:\\Github\\OpenXR-Simulator\\bin\\openxr_simulator.json",
     "startupDelaySeconds": 75,
     "captureTimeoutSeconds": 120,
-    "uevrRoot": "E:\\Github\\UEVRJ",
+    "uevrRoot": "E:\\Github\\UEVR",
     "renderDocRoot": "E:\\Github\\renderdoc",
     "stopAfterCapture": false
   }
@@ -329,8 +345,9 @@ Status: implemented.
   CMake build.
 - Copy `renderdoc.dll` and `renderdoc.pdb` beside `UEVRBackend.dll`.
 - Prefer RenderDoc's source-tree `renderdoc_app.h` in embedded builds.
-- Default to rebuilding RenderDoc whenever UEVR builds; set
-  `UEVR_RENDERDOC_ALWAYS_BUILD=OFF` when iterating only on UEVR sources.
+- Default to a prebuilt `renderdoc.dll` (`UEVR_RENDERDOC_ALWAYS_BUILD=OFF`); set
+  `UEVR_RENDERDOC_ALWAYS_BUILD=ON` to (re)build RenderDoc's own solution whenever
+  the UEVR target builds.
 
 ### Phase 1 - One UEVR RenderDoc API Surface
 
