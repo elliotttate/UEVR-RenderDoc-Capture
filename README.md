@@ -1,4 +1,24 @@
-# UEVR ![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
+# UEVR + 🎬 Embedded RenderDoc Capture
+
+> **This is a fork of [praydog's UEVR](https://github.com/praydog/UEVR) that adds an embedded
+> [RenderDoc](https://renderdoc.org/) capture system.** You can grab a real GPU frame
+> (flat *or* stereo VR) from almost any Unreal Engine game and open it in RenderDoc —
+> no game source, no headset required.
+>
+> ### 👉 **New here? Read the [RenderDoc Capture Guide](RENDERDOC_CAPTURE_GUIDE.md) — it walks you through everything step by step.**
+>
+> **Just want to capture?** Download the [latest release](../../releases/latest), unzip, and run:
+> ```powershell
+> .\UEVRRenderDocLauncher.exe --exe "C:\Path\To\YourGame-Win64-Shipping.exe" --wait
+> .\Capture-RenderDoc.ps1
+> ```
+>
+> Deeper design notes live in [docs/RENDERDOC_EMBEDDED_PORT.md](docs/RENDERDOC_EMBEDDED_PORT.md).
+> All UEVR credit goes to **praydog**; this fork only adds the capture plumbing + docs.
+
+---
+
+![build](https://github.com/praydog/UEVR/actions/workflows/dev-release.yml/badge.svg)
 
 Universal Unreal Engine VR Mod (4/5)
 

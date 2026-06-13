@@ -32,6 +32,8 @@
 #include "mods/FrameworkConfig.hpp"
 #include "DumperMode.hpp"
 #include "Framework.hpp"
+#include "render/RenderDocCaptureService.hpp"
+#include "render/RenderDocCaptureControl.hpp"
 
 namespace fs = std::filesystem;
 using namespace std::literals;
@@ -268,6 +270,46 @@ Framework::Framework(HMODULE framework_module)
     spdlog::info("Game Module Addr: {:x}", (uintptr_t)m_game_module);
     spdlog::info("Game Module Size: {:x}", module_size);
 
+    // RenderDoc integration. The startup thread (Main.cpp) already performs the
+    // earliest optional bootstrap before Framework construction when launched
+    // through the suspended RenderDoc launcher. This second pass runs after
+    // logging is configured: it reports status and starts the file-trigger
+    // capture watcher (%TEMP%/uevr_renderdoc_capture.req).
+    //
+    // Gated behind UEVR_RENDERDOC_BOOTSTRAP=1 (default OFF). An unconditional
+    // bootstrap would load renderdoc.dll into every injected process, which can
+    // perturb other graphics tooling and UEVR's own D3D12 hook install timing.
+    {
+        const bool rd_bootstrap_enabled = []() {
+            char v[8]{};
+            return GetEnvironmentVariableA("UEVR_RENDERDOC_BOOTSTRAP", v, sizeof(v)) > 0
+                   && v[0] != '\0' && v[0] != '0';
+        }();
+        if (rd_bootstrap_enabled) {
+            auto rd_result = uevr_renderdoc_bootstrap();
+            if (rd_result.api_loaded) {
+                spdlog::info("[RenderDoc] integration READY: v{}.{}.{} (preloaded={} loaded_by_uevr={} capture_safe={} d3d12_loaded_before={} dxgi_loaded_before={})",
+                             rd_result.api_version_major, rd_result.api_version_minor,
+                             rd_result.api_version_patch, rd_result.was_preloaded,
+                             rd_result.late_loaded, rd_result.capture_safe,
+                             rd_result.d3d12_was_loaded, rd_result.dxgi_was_loaded);
+                uevr::renderdoc_capture::refresh_hooks();
+                uevr_renderdoc_start_capture_watcher();
+                if (!rd_result.capture_safe) {
+                    spdlog::warn("[RenderDoc] capture_safe=DEGRADED: RenderDoc was initialized after "
+                                 "graphics modules were already present. Status/UI queries work, but "
+                                 "live captures may be incomplete. For full embedded capture, load "
+                                 "UEVR/RenderDoc before the game creates D3D12/DXGI objects (use "
+                                 "UEVRRenderDocLauncher.exe).");
+                }
+            } else {
+                spdlog::warn("[RenderDoc] UEVR_RENDERDOC_BOOTSTRAP=1 but the RenderDoc API failed to "
+                             "load. Set UEVR_LOAD_RENDERDOC_DLL=1 to late-load renderdoc.dll, or "
+                             "launch via UEVRRenderDocLauncher.exe.");
+            }
+        }
+    }
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
@@ -332,6 +374,33 @@ Framework::Framework(HMODULE framework_module)
     m_last_message_time = std::chrono::steady_clock::time_point{}; // Instantly send the first message
     m_last_chance_time = std::chrono::steady_clock::time_point{}; // Instantly send the first message
     m_has_last_chance = false;
+
+    // Optional early D3D12 prehook for the suspended RenderDoc launcher path.
+    // The launcher injects renderdoc.dll first, then UEVRBackend.dll, and waits
+    // on a ready event before resuming the game's main thread. Installing the
+    // D3D12 hook stack here (before resume) closes the fast-start race where the
+    // game could reach D3D12CreateDevice before UEVR's hook monitor runs.
+    // Gated behind UEVR_RENDERDOC_PREHOOK_D3D12=1 (only set by the launcher);
+    // normal injection leaves UEVR's lazy hook_monitor behaviour unchanged.
+    {
+        char prehook[8]{};
+        const bool prehook_d3d12 =
+            GetEnvironmentVariableA("UEVR_RENDERDOC_PREHOOK_D3D12", prehook, sizeof(prehook)) > 0
+            && prehook[0] != '\0' && prehook[0] != '0';
+        if (prehook_d3d12) {
+            spdlog::info("[RenderDoc] prehooking D3D12 before launcher resumes the game main thread");
+            if (hook_d3d12()) {
+                m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                m_last_message_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                m_last_chance_time = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                m_has_last_chance = true;
+                spdlog::info("[RenderDoc] early D3D12 prehook installed");
+            } else {
+                spdlog::warn("[RenderDoc] early D3D12 prehook failed; the launcher will still wait for "
+                             "UEVR startup, but first-device proof may fail");
+            }
+        }
+    }
 
     m_uevr_shared_memory = std::make_unique<UEVRSharedMemory>();
     m_command_thread = std::make_unique<std::jthread>([this](std::stop_token s) {

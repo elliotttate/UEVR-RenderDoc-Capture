@@ -36,6 +36,12 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_subdirectory(dependencies/submodules/UESDK)
+
+# Embedded RenderDoc capture: defines uevr_attach_full_renderdoc(), which copies
+# (or, if UEVR_RENDERDOC_ALWAYS_BUILD=ON, rebuilds) renderdoc.dll beside the
+# backend and builds the suspended launcher + smoke validator. Non-fatal if the
+# RenderDoc source/runtime isn't present.
+include(cmake/RenderDocFull.cmake)
 """
 
 [target.spdlog]
@@ -232,10 +238,11 @@ type = "shared"
 sources = ["src/**.cpp", "src/**.c"]
 headers = ["src/**.hpp", "src/**.h"]
 include-directories = [
-    "shared/", 
-    "src/", 
-    "include/", 
-    "${OPENXR_SOURCE_DIR}/src"
+    "shared/",
+    "src/",
+    "include/",
+    "${OPENXR_SOURCE_DIR}/src",
+    "dependencies/vendor/renderdoc"
 ]
 compile-options = ["/GS-", "/bigobj", "/EHa", "/MP"]
 compile-features = ["cxx_std_23"]
@@ -290,5 +297,9 @@ add_custom_command(
 add_custom_command(
     TARGET uevr POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:openvr> $<TARGET_FILE_DIR:uevr>)
+
+# Build the RenderDoc launcher + smoke tools and stage renderdoc.dll beside
+# UEVRBackend.dll. No-op if RenderDoc isn't available on this machine.
+uevr_attach_full_renderdoc(uevr)
 
 """
