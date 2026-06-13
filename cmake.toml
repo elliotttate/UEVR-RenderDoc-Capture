@@ -35,6 +35,11 @@ endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# UESDK is a PRIVATE submodule (praydog's SDK) so it can't be forked publicly to
+# carry the embedded-RenderDoc crash fix. Apply it to the builder's own checkout
+# before UESDK is added/compiled. Idempotent; warns (never fails) on drift.
+include(cmake/ApplyUESDKPatch.cmake)
+
 add_subdirectory(dependencies/submodules/UESDK)
 
 # Embedded RenderDoc capture: defines uevr_attach_full_renderdoc(), which copies
