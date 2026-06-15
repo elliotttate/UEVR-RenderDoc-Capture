@@ -1,6 +1,8 @@
 #define NOMINMAX
 
+#include <algorithm>
 #include <fstream>
+#include <string_view>
 
 #include <windows.h>
 #include <dbt.h>
@@ -25,9 +27,149 @@
 
 #include "VR.hpp"
 
+namespace {
+bool vr_env_explicit_false(const char* name) {
+    char value[32]{};
+    const auto len = GetEnvironmentVariableA(name, value, static_cast<DWORD>(sizeof(value)));
+    if (len == 0 || len >= sizeof(value)) {
+        return false;
+    }
+
+    std::string_view raw{value, std::min<DWORD>(len, static_cast<DWORD>(sizeof(value) - 1))};
+    return raw == "0" || raw == "false" || raw == "FALSE" || raw == "off" || raw == "OFF";
+}
+
+bool vr_afr_openxr_unpaced_enabled() {
+    // AFR OpenXR needs this cadence by default if we want to reach the headset rate.
+    // Keep the escape hatch because some runtimes may prefer the old every-other-eye submit.
+    return !vr_env_explicit_false("UEVR_AFR_OPENXR_UNPACED");
+}
+
+bool vr_afr_openxr_async_wait_enabled() {
+    return !vr_env_explicit_false("UEVR_AFR_OPENXR_ASYNC_WAIT");
+}
+}
+
 std::shared_ptr<VR>& VR::get() {
     //static std::shared_ptr<VR> instance = std::make_shared<VR>();
     return g_framework->vr();
+}
+
+VR::~VR() {
+    stop_afr_openxr_async_wait_worker();
+}
+
+void VR::ensure_afr_openxr_async_wait_worker() {
+    if (m_afr_openxr_async_wait_thread.joinable()) {
+        return;
+    }
+
+    m_afr_openxr_async_wait_thread = std::jthread([this](std::stop_token stop_token) {
+        afr_openxr_async_wait_worker_loop(stop_token);
+    });
+}
+
+void VR::stop_afr_openxr_async_wait_worker() {
+    {
+        std::lock_guard lock{m_afr_openxr_async_wait_mtx};
+        m_afr_openxr_async_wait_pending = false;
+    }
+
+    if (m_afr_openxr_async_wait_thread.joinable()) {
+        m_afr_openxr_async_wait_thread.request_stop();
+        m_afr_openxr_async_wait_cv.notify_all();
+        m_afr_openxr_async_wait_thread.join();
+    }
+
+    m_afr_openxr_async_wait_inflight.store(false);
+}
+
+bool VR::is_afr_openxr_pacing_active() const {
+    return vr_afr_openxr_unpaced_enabled() &&
+        m_rendering_method->value() == RenderingMethod::ALTERNATING;
+}
+
+void VR::request_afr_openxr_async_wait(uint32_t pre_acquire_swapchain_idx) {
+    if (!is_afr_openxr_pacing_active() || !vr_afr_openxr_async_wait_enabled()) {
+        return;
+    }
+
+    // The render thread just submitted a frame. If OpenXR is idle now, ask the
+    // worker to wait for the next runtime frame instead of making present pay for it.
+    auto openxr = m_openxr;
+    if (openxr == nullptr ||
+        !openxr->loaded ||
+        !openxr->session_ready ||
+        !openxr->ever_submitted ||
+        openxr->last_successful_rendered_end_frame.time_since_epoch().count() == 0 ||
+        openxr->frame_synced ||
+        openxr->frame_began)
+    {
+        return;
+    }
+
+    if (m_afr_openxr_async_wait_inflight.exchange(true)) {
+        return;
+    }
+
+    ensure_afr_openxr_async_wait_worker();
+
+    {
+        std::lock_guard lock{m_afr_openxr_async_wait_mtx};
+        m_afr_openxr_pre_acquire_swapchain_idx = pre_acquire_swapchain_idx;
+        m_afr_openxr_async_wait_pending = true;
+    }
+
+    m_afr_openxr_async_wait_cv.notify_one();
+}
+
+void VR::afr_openxr_async_wait_worker_loop(std::stop_token stop_token) {
+    SetThreadDescription(GetCurrentThread(), L"UEVR AFR OpenXR Async Wait");
+    if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST)) {
+        spdlog::warn("[OpenXR][AFR] Failed to raise async wait worker priority: {}", GetLastError());
+    }
+
+    while (!stop_token.stop_requested()) {
+        uint32_t pre_acquire_swapchain_idx{};
+        {
+            std::unique_lock lock{m_afr_openxr_async_wait_mtx};
+            m_afr_openxr_async_wait_cv.wait(lock, [this, &stop_token]() {
+                return stop_token.stop_requested() || m_afr_openxr_async_wait_pending;
+            });
+
+            if (stop_token.stop_requested()) {
+                break;
+            }
+
+            pre_acquire_swapchain_idx = m_afr_openxr_pre_acquire_swapchain_idx;
+            m_afr_openxr_async_wait_pending = false;
+        }
+
+        utility::ScopeGuard clear_inflight{[this]() {
+            m_afr_openxr_async_wait_inflight.store(false);
+        }};
+
+        auto openxr = m_openxr;
+        if (openxr == nullptr || !openxr->loaded || !openxr->session_ready) {
+            continue;
+        }
+
+        if (!is_afr_openxr_pacing_active() || openxr->frame_synced || openxr->frame_began) {
+            continue;
+        }
+
+        // This is the slow OpenXR pacing call. Doing it here gives the next eye
+        // a fresh frame token without stalling the game's render thread.
+        openxr->synchronize_frame(std::nullopt, VRRuntime::SyncFrameCallsite::VRAfrAsyncPostPresent);
+
+        if (openxr->frame_synced && !openxr->frame_began) {
+            // Also grab the next eye's swapchain image while the worker is already
+            // awake. The later copy can then use it directly on the render thread.
+            m_d3d12.openxr().pre_acquire(pre_acquire_swapchain_idx);
+        }
+    }
+
+    m_afr_openxr_async_wait_inflight.store(false);
 }
 
 // Called when the mod is initialized
@@ -2127,8 +2269,12 @@ void VR::on_present() {
     vr::EVRCompositorError e = vr::EVRCompositorError::VRCompositorError_None;
 
     const auto is_left_eye_frame = is_using_afr() ? (m_render_frame_count % 2 == m_left_eye_interval) : true;
+    const auto d3d12_afr_openxr_unpaced =
+        renderer == Framework::RendererType::D3D12 &&
+        runtime->is_openxr() &&
+        is_afr_openxr_pacing_active();
 
-    if (is_left_eye_frame && get_synchronize_stage() == VR::SynchronizeStage::LATE) {
+    if (is_left_eye_frame && !d3d12_afr_openxr_unpaced && get_synchronize_stage() == VR::SynchronizeStage::LATE) {
         const auto had_sync = runtime->got_first_sync;
         runtime->synchronize_frame();
 
@@ -2218,8 +2364,12 @@ void VR::on_post_present() {
     detect_controllers();
 
     const auto is_left_eye_frame = is_using_afr() ? (is_same_frame || (m_render_frame_count % 2 == m_left_eye_interval)) : true;
+    const auto d3d12_afr_openxr_unpaced =
+        m_is_d3d12 &&
+        runtime->is_openxr() &&
+        is_afr_openxr_pacing_active();
 
-    if (is_left_eye_frame) {
+    if (is_left_eye_frame && !d3d12_afr_openxr_unpaced) {
         if (get_synchronize_stage() == VR::SynchronizeStage::VERY_LATE || !runtime->got_first_sync) {
             const auto had_sync = runtime->got_first_sync;
             runtime->synchronize_frame();

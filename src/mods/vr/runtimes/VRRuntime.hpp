@@ -19,6 +19,11 @@ struct VRRuntime {
         // rest of the error codes will be from the specific VR runtime
     };
 
+    enum class SyncFrameCallsite : uint8_t {
+        Unknown,
+        VRAfrAsyncPostPresent,
+    };
+
     enum class Type : uint8_t {
         NONE,
         OPENXR,
@@ -53,7 +58,11 @@ struct VRRuntime {
         this->loaded = false;
     }
 
-    virtual Error synchronize_frame(std::optional<uint32_t> frame_count = std::nullopt) {
+    virtual Error synchronize_frame(
+        std::optional<uint32_t> frame_count = std::nullopt,
+        SyncFrameCallsite callsite = SyncFrameCallsite::Unknown) {
+        (void)frame_count;
+        (void)callsite;
         return Error::SUCCESS;
     }
 

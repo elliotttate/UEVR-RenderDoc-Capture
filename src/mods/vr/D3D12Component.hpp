@@ -165,6 +165,7 @@ private:
         void initialize(XrSessionCreateInfo& session_info);
         std::optional<std::string> create_swapchains();
         void destroy_swapchains();
+        void pre_acquire(uint32_t swapchain_idx);
         void copy(uint32_t swapchain_idx, ID3D12Resource* src,
             std::optional<std::function<void(d3d12::CommandContext&, ID3D12Resource*)>> pre_commands = std::nullopt,
             std::optional<std::function<void(d3d12::CommandContext&)>> additional_commands = std::nullopt,
@@ -204,6 +205,7 @@ private:
             uint32_t num_textures_acquired{0};
             uint32_t last_acquired_texture{0};
             bool ever_acquired{false};
+            bool pre_acquired{false};
         };
 
         std::unordered_map<uint32_t, SwapchainContext> contexts{};

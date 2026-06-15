@@ -2,8 +2,13 @@
 
 #define NOMINMAX
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include <sdk/Math.hpp>
 
@@ -98,6 +103,8 @@ public:
     static const inline std::string s_action_thumbrest_touch_right = "/actions/default/in/ThumbrestTouchRight";
 
 public:
+    ~VR() override;
+
     static std::shared_ptr<VR>& get();
 
     std::string_view get_name() const override { return "VR"; }
@@ -411,6 +418,9 @@ public:
                m_extreme_compat_mode->value() == true;
     }
 
+    bool is_afr_openxr_pacing_active() const;
+    void request_afr_openxr_async_wait(uint32_t pre_acquire_swapchain_idx);
+
     bool is_using_synchronized_afr() const {
         return m_rendering_method->value() == RenderingMethod::SYNCHRONIZED ||
                (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO);
@@ -693,6 +703,8 @@ private:
         } else {
             m_d3d11.openxr().destroy_swapchains();
         }
+
+        stop_afr_openxr_async_wait_worker();
 
         m_openxr.reset();
         m_runtime.reset();
@@ -1123,6 +1135,15 @@ private:
     int m_right_eye_frame_count{0};
 
     bool m_submitted{false};
+    void ensure_afr_openxr_async_wait_worker();
+    void stop_afr_openxr_async_wait_worker();
+    void afr_openxr_async_wait_worker_loop(std::stop_token stop_token);
+    std::jthread m_afr_openxr_async_wait_thread{};
+    std::mutex m_afr_openxr_async_wait_mtx{};
+    std::condition_variable m_afr_openxr_async_wait_cv{};
+    std::atomic_bool m_afr_openxr_async_wait_inflight{false};
+    uint32_t m_afr_openxr_pre_acquire_swapchain_idx{0};
+    bool m_afr_openxr_async_wait_pending{false};
 
     // == 1 or == 0
     uint8_t m_left_eye_interval{0};

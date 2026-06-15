@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_set>
+#include <chrono>
 #include <deque>
 
 #include <d3d11.h>
@@ -71,7 +72,9 @@ struct OpenXR final : public VRRuntime {
     void on_pre_render_render_thread(uint32_t frame_count) override {};
     void on_pre_render_rhi_thread(uint32_t frame_count) override {};
 
-    VRRuntime::Error synchronize_frame(std::optional<uint32_t> frame_count = std::nullopt) override;
+    VRRuntime::Error synchronize_frame(
+        std::optional<uint32_t> frame_count = std::nullopt,
+        VRRuntime::SyncFrameCallsite callsite = VRRuntime::SyncFrameCallsite::Unknown) override;
     VRRuntime::Error fix_frame() override {
         // sync if necessary.
         VRRuntime::fix_frame();
@@ -173,9 +176,12 @@ public:
     double prediction_scale{0.0};
     bool session_ready{false};
     bool frame_began{false};
+    bool last_end_frame_rendered{false};
+    bool has_valid_projection_data{false};
     bool profile_calls{false};
 
     std::chrono::high_resolution_clock::time_point profiler_start_time{};
+    std::chrono::steady_clock::time_point last_successful_rendered_end_frame{};
 
     std::recursive_mutex sync_mtx{};
     std::recursive_mutex sync_assignment_mtx{};

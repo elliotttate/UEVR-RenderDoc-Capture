@@ -1,6 +1,7 @@
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 
@@ -8,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 #include <utility/String.hpp>
+#include <utility/Logging.hpp>
 #include <imgui.h>
 
 #include <sdk/CVar.hpp>
@@ -21,6 +23,23 @@
 using namespace nlohmann;
 
 namespace runtimes {
+bool is_projection_component_valid(float value) {
+    return std::isfinite(value);
+}
+
+bool is_eye_projection_valid(const Vector4f& projection) {
+    constexpr auto epsilon = 1.0e-5f;
+
+    return is_projection_component_valid(projection[0]) &&
+           is_projection_component_valid(projection[1]) &&
+           is_projection_component_valid(projection[2]) &&
+           is_projection_component_valid(projection[3]) &&
+           projection[0] < -epsilon &&
+           projection[1] > epsilon &&
+           projection[2] > epsilon &&
+           projection[3] < -epsilon;
+}
+
 void OpenXR::on_draw_ui() {
     ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     if (ImGui::TreeNode("OpenXR Options")) {
@@ -116,21 +135,21 @@ void OpenXR::on_pre_render_game_thread(uint32_t frame_count) {
     this->pipeline_states[frame_count % OpenXR::QUEUE_SIZE].frame_count = frame_count;
 }
 
-VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count) {
+VRRuntime::Error OpenXR::synchronize_frame(std::optional<uint32_t> frame_count, VRRuntime::SyncFrameCallsite callsite) {
+    (void)callsite;
+
     std::scoped_lock _{sync_mtx};
 
     // cant sync frame between begin and endframe
     if (!this->session_ready || this->frame_began) {
         if (this->frame_began) {
-            spdlog::info("Frame already began, skipping xrWaitFrame call.");
+            SPDLOG_INFO_EVERY_N_SEC(1, "Frame already began, skipping xrWaitFrame call.");
         }
         
         return VRRuntime::Error::UNSPECIFIED;
     }
 
     if (this->frame_synced) {
-        spdlog::info("Frame already synchronized, skipping xrWaitFrame call.");
-
         return VRRuntime::Error::SUCCESS;
     }
 
@@ -427,6 +446,8 @@ VRRuntime::Error OpenXR::consume_events(std::function<void(void*)> callback) {
                     spdlog::error("VR: xrBeginSession failed: {}", this->get_result_string(result));
                 } else {
                     this->session_ready = true;
+                    this->last_end_frame_rendered = false;
+                    this->last_successful_rendered_end_frame = {};
                     synchronize_frame();
                 }
             } else if (ev->state == XR_SESSION_STATE_LOSS_PENDING) {
@@ -440,6 +461,8 @@ VRRuntime::Error OpenXR::consume_events(std::function<void(void*)> callback) {
                     this->session_ready = false;
                     this->frame_synced = false;
                     this->frame_began = false;
+                    this->last_end_frame_rendered = false;
+                    this->last_successful_rendered_end_frame = {};
 
                     if (this->wants_reinitialize) {
                         //initialize_openxr();
@@ -568,8 +591,35 @@ VRRuntime::Error OpenXR::update_matrices(float nearz, float farz) {
         this->raw_projections[1][1] = tan(right_fov.angleRight);
         this->raw_projections[1][2] = tan(right_fov.angleUp);
         this->raw_projections[1][3] = tan(right_fov.angleDown);
+
+        if (!is_eye_projection_valid(this->raw_projections[0]) || !is_eye_projection_valid(this->raw_projections[1])) {
+            // Some runtimes briefly hand back unusable FOV data during startup or
+            // reconfiguration. Do not let one bad sample poison the projection
+            // bounds we use for later frame submission.
+            spdlog::warn(
+                "[OpenXR] Refusing to recalculate eye projections from invalid FOVs. Left=({}, {}, {}, {}) Right=({}, {}, {}, {})",
+                this->raw_projections[0][0], this->raw_projections[0][1], this->raw_projections[0][2], this->raw_projections[0][3],
+                this->raw_projections[1][0], this->raw_projections[1][1], this->raw_projections[1][2], this->raw_projections[1][3]
+            );
+
+            if (!this->has_valid_projection_data) {
+                view_bounds[0][0] = 0.0f;
+                view_bounds[0][1] = 1.0f;
+                view_bounds[0][2] = 0.0f;
+                view_bounds[0][3] = 1.0f;
+                view_bounds[1][0] = 0.0f;
+                view_bounds[1][1] = 1.0f;
+                view_bounds[1][2] = 0.0f;
+                view_bounds[1][3] = 1.0f;
+            }
+
+            this->should_update_eye_matrices = false;
+            return VRRuntime::Error::SUCCESS;
+        }
+
         this->projections[0] = get_mat(0);
         this->projections[1] = get_mat(1);
+        this->has_valid_projection_data = true;
         this->should_recalculate_eye_projections = false;
         this->last_eye_matrix_nearz = nearz;
     }
@@ -687,6 +737,8 @@ void OpenXR::destroy() {
     this->system = XR_NULL_SYSTEM_ID;
     this->frame_synced = false;
     this->frame_began = false;
+    this->last_end_frame_rendered = false;
+    this->last_successful_rendered_end_frame = {};
 }
 
 OpenXR::PipelineState OpenXR::get_submit_state() {
@@ -1892,6 +1944,8 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
     //spdlog::info("[VR] Ending frame, {} layers", frame_end_info.layerCount);
     //spdlog::info("[VR] Ending frame, layer ptr: {:x}", (uintptr_t)frame_end_info.layers);
 
+    this->last_end_frame_rendered = false;
+
     this->begin_profile();
     auto result = xrEndFrame(this->session, &frame_end_info);
     this->end_profile("xrEndFrame");
@@ -1904,7 +1958,16 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
              spdlog::error("[VR] display time diff: {}", frame_end_info.displayTime - this->frame_state.predictedDisplayTime);
         }
     } else {
+        const bool submitted_rendered_frame =
+            frame_end_info.layerCount > 0 &&
+            pipelined_frame_state.shouldRender == XR_TRUE;
+
         this->ever_submitted = true;
+        this->last_end_frame_rendered = submitted_rendered_frame;
+
+        if (submitted_rendered_frame) {
+            this->last_successful_rendered_end_frame = std::chrono::steady_clock::now();
+        }
     }
     
     this->frame_began = false;
