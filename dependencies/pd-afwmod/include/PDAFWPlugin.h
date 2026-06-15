@@ -57,11 +57,11 @@ namespace pd {
 		ID3D12Resource*               pTexture = nullptr;
 		int                           srvPos = -1;
 		int                           uavPos = -1;
-		D3D12_GPU_DESCRIPTOR_HANDLE shaderResourceViewHandle;
-		D3D12_GPU_DESCRIPTOR_HANDLE unorderedAccessViewHandle;
+		D3D12_GPU_DESCRIPTOR_HANDLE shaderResourceViewHandle {0};
+		D3D12_GPU_DESCRIPTOR_HANDLE unorderedAccessViewHandle {0};
 		union
 		{
-			D3D12_CPU_DESCRIPTOR_HANDLE renderTargetViewHandle;
+			D3D12_CPU_DESCRIPTOR_HANDLE renderTargetViewHandle {0};
 			D3D12_CPU_DESCRIPTOR_HANDLE depthStencilViewHandle;
 		};
 		D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON;

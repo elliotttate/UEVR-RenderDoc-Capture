@@ -4658,10 +4658,12 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
     const auto has_double_precision = g_hook->m_has_double_precision;
     const auto rot_d = (Rotator<double>*)view_rotation;
 
+    auto view_location_other = has_double_precision ? Vector3f() : *view_location;
+
     if (vr->is_using_afr() && !is_full_pass) {
         true_index = g_frame_count % 2;
 
-        if (!vr->is_using_synchronized_afr()) {
+        if (!vr->is_using_synchronized_afr() && !vr->is_using_afw()) {
             if (g_hook->m_has_double_precision) {
                 if (true_index == 1) {
                     *rot_d = g_hook->m_last_afr_rotation_double;
@@ -4678,7 +4680,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         }
     }
 
-    if (true_index == 0 && !is_full_pass) {
+    if ((true_index == 0 || vr->is_using_afw()) && !is_full_pass) {
         if (has_double_precision) {
             g_hook->m_last_pre_rotation_double = *rot_d;
         } else {
@@ -4721,7 +4723,9 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
     }
 
     const auto view_d = (Vector3d*)view_location;
+    auto view_d_other = has_double_precision ? *view_d : Vector3d();
 
+    // world to view
     const auto view_mat = !has_double_precision ? 
         glm::yawPitchRoll(
             glm::radians(view_rotation->yaw),
@@ -4732,6 +4736,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
             glm::radians((float)rot_d->pitch),
             glm::radians((float)rot_d->roll));
 
+    // view to world
     const auto view_mat_inverse = !has_double_precision ? 
         glm::yawPitchRoll(
             glm::radians(-view_rotation->yaw),
@@ -4778,10 +4783,16 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         *view_d += camera_forward;
         *view_d += camera_right;
         *view_d += camera_up;
+        view_d_other += camera_forward;
+        view_d_other += camera_right;
+        view_d_other += camera_up;
     } else {
         *view_location += camera_forward;
         *view_location += camera_right;
         *view_location += camera_up;
+        view_location_other += camera_forward;
+        view_location_other += camera_right;
+        view_location_other += camera_up;
     }
 
     // Don't apply any headset transformations
@@ -4796,6 +4807,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
 
         const auto new_rotation = glm::normalize(vqi_norm * current_hmd_rotation * current_eye_rotation_offset);
         const auto eye_offset = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)(true_index))};
+        const auto eye_offset_other = glm::vec3{vr->get_eye_offset((VRRuntime::Eye)((true_index + 1) % 2))};
 
 
         const auto standing_delta = vr->get_position(0) - vr->get_standing_origin();
@@ -4807,19 +4819,24 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         const auto head_offset = quat_converter * (vqi_norm * (pos * world_scale));
         const auto head_offset_flat = quat_converter * (vqi_norm * (pos_flat * world_scale));
         const auto eye_separation = quat_converter * (glm::normalize(new_rotation) * (eye_offset * world_scale));
+        const auto eye_separation_other = quat_converter * (glm::normalize(new_rotation) * (eye_offset_other * world_scale));
 
         if (!has_double_precision) {
             if (!is_2d_screen) {
                 *view_location -= head_offset;
+                view_location_other -= head_offset;
             }
 
             *view_location -= eye_separation;
+            view_location_other -= eye_separation_other;
         } else {
             if (!is_2d_screen) {
                 *view_d -= head_offset;
+                view_d_other -= head_offset;
             }
 
             *view_d -= eye_separation;
+            view_d_other -= eye_separation_other;
         }
 
         if (!is_2d_screen) {
@@ -4839,7 +4856,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         // Roomscale movement
         // only do it on the right eye pass
         // if we did it on the left, there would be eye desyncs when the right eye is rendered
-        if (true_index == 1 && (vr->is_roomscale_enabled() || vr->is_aim_pawn_control_rotation_enabled())) {
+        if ((true_index == 1 || vr->is_using_afw()) && (vr->is_roomscale_enabled() || vr->is_aim_pawn_control_rotation_enabled())) {
             const auto world = sdk::UEngine::get()->get_world();
 
             if (const auto controller = sdk::UGameplayStatics::get()->get_player_controller(world, 0); controller != nullptr) {
@@ -4892,6 +4909,51 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
 
         // Process snapturn    
         vr->process_snapturn();
+        
+        const auto world_to_view = !has_double_precision ? 
+            glm::yawPitchRoll(
+                glm::radians(view_rotation->yaw),
+                glm::radians(view_rotation->pitch),
+                glm::radians(view_rotation->roll)) : 
+            glm::yawPitchRoll(
+                glm::radians((float)rot_d->yaw),
+                glm::radians((float)rot_d->pitch),
+                glm::radians((float)rot_d->roll));
+        const auto view_to_world = !has_double_precision ? 
+            glm::yawPitchRoll(
+                glm::radians(-view_rotation->yaw),
+                glm::radians(view_rotation->pitch),
+                glm::radians(-view_rotation->roll)) : 
+            glm::yawPitchRoll(
+                glm::radians(-(float)rot_d->yaw),
+                glm::radians((float)rot_d->pitch),
+                glm::radians(-(float)rot_d->roll));
+        // 片段：在 calculate_stereo_view_offset 方法末尾调用或插入以获取最终 view 矩阵
+        if (!has_double_precision) {
+            glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
+            glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
+            cam_pos = glm::vec3(cam_pos.y, cam_pos.z, -cam_pos.x);
+            cam_pos_other = glm::vec3(cam_pos_other.y, cam_pos_other.z, -cam_pos_other.x);
+            glm::mat4 view_matrix = glm::translate(glm::mat4(1.0f), cam_pos) * view_to_world;
+            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0f), cam_pos_other) * view_to_world;
+            vr->render_view_matrix[true_index][2] = vr->render_view_matrix[true_index][1];
+            vr->render_view_matrix[true_index][1] = vr->render_view_matrix[true_index][0];
+            vr->render_view_matrix[true_index][0].curr = glm::inverse(view_matrix);
+            vr->render_view_matrix[true_index][0].other = glm::inverse(view_matrix_other);
+            vr->last_update_matrix_frame_count[true_index] = g_frame_count;
+        } else {
+            glm::dvec3 cam_pos_d = (*view_d) / double(vr->get_world_to_meters());
+            glm::dvec3 cam_pos_d_other = view_d_other / double(vr->get_world_to_meters());
+            cam_pos_d = glm::dvec3(cam_pos_d.y, cam_pos_d.z, -cam_pos_d.x);
+            cam_pos_d_other = glm::dvec3(cam_pos_d_other.y, cam_pos_d_other.z, -cam_pos_d_other.x);
+            glm::mat4 view_matrix = glm::translate(glm::mat4(1.0), glm::vec3(cam_pos_d)) * view_to_world;
+            glm::mat4 view_matrix_other = glm::translate(glm::mat4(1.0), glm::vec3(cam_pos_d_other)) * view_to_world;
+            vr->render_view_matrix[true_index][2] = vr->render_view_matrix[true_index][1];
+            vr->render_view_matrix[true_index][1] = vr->render_view_matrix[true_index][0];
+            vr->render_view_matrix[true_index][0].curr = glm::inverse(view_matrix);
+            vr->render_view_matrix[true_index][0].other = glm::inverse(view_matrix_other);
+            vr->last_update_matrix_frame_count[true_index] = g_frame_count;
+        }
     }
 
     if (!is_full_pass) {
@@ -4899,7 +4961,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
             mod->on_post_calculate_stereo_view_offset(stereo, view_index, view_rotation, world_to_meters, view_location, g_hook->m_has_double_precision);
         }
 
-        if (true_index == 0) {
+        if (true_index == 0 || vr->is_using_afw()) {
             if (has_double_precision) {
                 g_hook->m_last_rotation_double = *rot_d;
             } else {
@@ -4908,7 +4970,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
         }
 
         // Modify Player Control Rotation
-        if (true_index == 1 && vr->is_aim_modify_player_control_rotation_enabled() && vr->is_any_aim_method_active()) {
+        if ((true_index == 1|| vr->is_using_afw()) && vr->is_aim_modify_player_control_rotation_enabled() && vr->is_any_aim_method_active()) {
             if (g_hook->m_tracking_system_hook != nullptr) {
                 g_hook->m_tracking_system_hook->manual_update_control_rotation();
             }
@@ -5009,6 +5071,7 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
         const float ys = width / glm::tan(half_fov) / height;
         const float near_z = sdk::globals::get_near_clipping_plane();
 
+        auto true_index = index_starts_from_one ? ((view_index + 1) % 2) : (view_index % 2);
         if (g_hook->m_has_double_precision) {
             (*(Matrix4x4d*)out) = Matrix4x4d {
                 xs, 0.0, 0.0, 0.0,
@@ -5016,6 +5079,8 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
                 0.0, 0.0, 0.0, 1.0,
                 0.0, 0.0, near_z, 0.0
             };
+            vr->render_projection_matrix[true_index].curr = Matrix4x4f(*(Matrix4x4d*)out);
+            vr->render_projection_matrix[true_index].other = Matrix4x4f(*(Matrix4x4d*)out);
         } else {
             *out = Matrix4x4f {
                 xs, 0.0f, 0.0f, 0.0f,
@@ -5023,6 +5088,8 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
                 0.0f, 0.0f, 0.0f, 1.0f,
                 0.0f, 0.0f, near_z, 0.0f
             };
+            vr->render_projection_matrix[true_index].curr = *out;
+            vr->render_projection_matrix[true_index].other = *out;
         }
 
         return out;
@@ -5051,9 +5118,17 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
 
         if (!g_hook->m_has_double_precision) {
             *out = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
+            if (true_index >= 0 && true_index <= 1) {
+                vr->render_projection_matrix[true_index].curr = VR::get()->get_runtime()->afw_projections[true_index];
+                vr->render_projection_matrix[true_index].other = VR::get()->get_runtime()->afw_projections[(true_index + 1) % 2];
+            }
         } else {
             const auto fmat = VR::get()->get_projection_matrix((VRRuntime::Eye)(true_index));
             double_matrix = fmat;
+            if (true_index >= 0 && true_index <= 1) {
+                vr->render_projection_matrix[true_index].curr = VR::get()->get_runtime()->afw_projections[true_index];
+                vr->render_projection_matrix[true_index].other = VR::get()->get_runtime()->afw_projections[(true_index + 1) % 2];
+            }
         }
     } else {
         SPDLOG_ERROR("CalculateStereoProjectionMatrix returned nullptr!");

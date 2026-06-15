@@ -166,7 +166,8 @@ struct VRRuntime {
     std::chrono::steady_clock::time_point last_select_press{};
 
     std::optional<std::string> error{};
-
+    
+    std::array<Matrix4x4f, 2> afw_projections{};
     std::array<Matrix4x4f, 2> projections{};
     std::array<Matrix4x4f, 2> eyes{};
     std::array<Matrix4x4f, 2> aim_matrices{};

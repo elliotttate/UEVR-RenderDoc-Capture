@@ -27,18 +27,19 @@
 
 #include <safetyhook.hpp>
 
-NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_CreateFeature(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Feature InFeatureID, NVSDK_NGX_Parameter* InParameters, NVSDK_NGX_Handle** OutHandle) {
+NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_CreateFeature(
+    ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Feature InFeatureID, NVSDK_NGX_Parameter* InParameters, NVSDK_NGX_Handle** OutHandle) {
     spdlog::info("hk_NVSDK_NGX_D3D12_CreateFeature FeatureID {}", (int)InFeatureID);
     auto result = NVSDK_NGX_D3D12_CreateFeature_Hook.call<NVSDK_NGX_Result>(InCmdList, InFeatureID, InParameters, OutHandle);
     const auto& vr = VR::get();
     int flag;
     InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flag);
     spdlog::info("hk_NVSDK_NGX_D3D12_CreateFeature 0x{0:x}", (INT64)result);
-    if (vr->vrDLSSHandle[0] == NULL && (InFeatureID == NVSDK_NGX_Feature_SuperSampling || InFeatureID == NVSDK_NGX_Feature_RayReconstruction)) {
-        vr->vrDLSSHandle[0] = *OutHandle;
-        spdlog::info("Creating additional DLSS instance");
-        auto result2 = NVSDK_NGX_D3D12_CreateFeature_Hook.call<NVSDK_NGX_Result>(InCmdList, InFeatureID, InParameters, &vr->vrDLSSHandle[1]);
-        spdlog::info("Additional DLSS instance create result 0x{0:x}", (INT64)result2);
+    if ((InFeatureID == NVSDK_NGX_Feature_SuperSampling || InFeatureID == NVSDK_NGX_Feature_RayReconstruction)) {
+        if (vr->vrDLSSHandle[0] == NULL)
+            vr->vrDLSSHandle[0] = *OutHandle;
+        else
+            vr->vrDLSSHandle[1] = *OutHandle;
     }
     return result;
 }
@@ -50,18 +51,9 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* InHandle) {
     const auto& vr = VR::get();
     if (vr->vrDLSSHandle[0] == InHandle) {
         vr->vrDLSSHandle[0] = NULL;
-        vr->depthDesc[0].pTexture = NULL;
-        vr->depthDesc[1].pTexture = NULL;
-        vr->uiBufferDesc[0].pTexture = NULL;
-        vr->uiBufferDesc[1].pTexture = NULL;
-        vr->uiBufferTex[0] = NULL;
-        vr->uiBufferTex[1] = NULL;
-        //vr->renderDepthDesc.pTexture = NULL;
-        if (vr->vrDLSSHandle[1] != NULL) {
-            auto result2 = NVSDK_NGX_D3D12_ReleaseFeature_Hook.call<NVSDK_NGX_Result>(vr->vrDLSSHandle[1]);
-            spdlog::info("Additional DLSS instance release result 0x{0:x}", (INT64)result2);
-            vr->vrDLSSHandle[1] = NULL;
-        }
+    }
+    if (vr->vrDLSSHandle[1] == InHandle) {
+        vr->vrDLSSHandle[1] = NULL;
     }
     return result;
 }
@@ -69,7 +61,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* InHandle) {
 NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
     ID3D12GraphicsCommandList* InCmdList, const NVSDK_NGX_Handle* InFeatureHandle, NVSDK_NGX_Parameter* InParameters, void* InCallback) {
     const auto& vr = VR::get();
-    if (InFeatureHandle == vr->vrDLSSHandle[0]) {
+    if (InFeatureHandle == vr->vrDLSSHandle[0] || InFeatureHandle == vr->vrDLSSHandle[1]) {
         ID3D12Resource* color;
         ID3D12Resource* depth;
         ID3D12Resource* motionVectors;
@@ -78,184 +70,23 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         InParameters->Get(NVSDK_NGX_Parameter_Depth, &depth);
         InParameters->Get(NVSDK_NGX_Parameter_MotionVectors, &motionVectors);
         InParameters->Get(NVSDK_NGX_Parameter_Output, &output);
-        float mvScaleX;
-        float mvScaleY;
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &mvScaleX);
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &mvScaleY);
+        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &vr->mvScale[0]);
+        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &vr->mvScale[1]);
+        vr->rawDepthTex = depth;
         vr->rawMotionVectorsTex = motionVectors;
-        if (vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc.pTexture) {
-
-            auto desc1 = motionVectors->GetDesc();
-            auto desc2 = vr->motionVectorsDesc.pTexture->GetDesc();
-            if ((abs((float)(desc1.Width - desc2.Width)) <= 2 && abs((float)(desc1.Height - desc2.Height)) <= 2 && desc1.Format == desc2.Format)) {
-                TextureDesc src;
-                src.pTexture = motionVectors;
-                vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc, src);
-                if (vr->foveatedDepthDesc.pTexture) {
-                    src.pTexture = depth;
-                    vr->d3d12Renderer->Copy(InCmdList, vr->foveatedDepthDesc, src);
-                }
-
-                if (vr->is_fix_dlss()) {
-                    EyeIndex nEye = (vr->get_vr_frame_count() % 2 == 0) ? EyeLeft : EyeRight;
-                    auto currHandle = vr->vrDLSSHandle[0];
-                    if (nEye == EyeLeft) {
-                        currHandle = vr->vrDLSSHandle[0];
-                    } else {
-                        currHandle = vr->vrDLSSHandle[1];
-                    }
-
-                    // current rendered eye
-                    auto result = NVSDK_NGX_D3D12_EvaluateFeature_Hook.call<NVSDK_NGX_Result>(InCmdList, currHandle, InParameters, InCallback);
-                    if (NVSDK_NGX_FAILED(result)) {
-                        spdlog::error("Failed DLSS 00, code = 0x{0:x}", result);
-                    }
-                    return result;
-                }
-            }
-            else {
-                spdlog::error("hk_NVSDK_NGX_D3D12_EvaluateFeature motionVectorsTex mistmatch! Desc1:{}x{} {}  Desc2:{}x{} {}", desc1.Width,
-                    desc1.Height, (int)desc1.Format, desc2.Width, desc2.Height, (int)desc2.Format);
-            }
+        EyeIndex nEye = (vr->get_render_frame_count() % 2 == 0) ? EyeLeft : EyeRight;
+        if (vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture) {
+            TextureDesc src;
+            src.pTexture = depth;
+            vr->d3d12Renderer->Copy(InCmdList, vr->depthDesc[nEye], src);
+            src.pTexture = motionVectors;
+            vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], src);
         }
     }
     auto result = NVSDK_NGX_D3D12_EvaluateFeature_Hook.call<NVSDK_NGX_Result>(InCmdList, InFeatureHandle, InParameters, InCallback);
     return result;
 }
 
-ffxReturnCode_t hk_ffxCreateContext(ffxContext* context, ffxCreateContextDescHeader* desc, const void** memCb) {
-    auto vr = VR::get();
-    auto result = ffxCreateContext_Hook.call<ffxReturnCode_t>(context, desc, memCb);
-    spdlog::info("hk_ffxCreateContext 0x{0:x}", (INT64)result);
-    if (desc->type == FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE) {
-        auto createDesc = reinterpret_cast<const ffxCreateContextDescUpscale*>(desc);
-        vr->vrContexts[0] = *context;
-        spdlog::info("Creating additional FSR context");
-        auto result2 = o_ffxCreateContext(&vr->vrContexts[1], desc, NULL);
-        spdlog::info("Additional FSR context create result 0x{0:x}", (INT64)result2);
-    }
-    return ffxCreateContext_Hook.call<ffxReturnCode_t>(context, desc, memCb);
-}
-
-ffxReturnCode_t hk_ffxDestroyContext(ffxContext* context, const void** memCb) {
-    auto vr = VR::get();
-    if (context == vr->vrContexts[0]) {
-        spdlog::info("hk_ffxDestroyContext 0x{0:x}", (INT64)context);
-        vr->vrContexts[0] = NULL;
-        vr->depthDesc[0].pTexture = NULL;
-        vr->depthDesc[1].pTexture = NULL;
-        vr->uiBufferDesc[0].pTexture = NULL;
-        vr->uiBufferDesc[1].pTexture = NULL;
-        vr->uiBufferTex[0] = NULL;
-        vr->uiBufferTex[1] = NULL;
-        if (vr->vrContexts[1] != NULL) {
-            auto result2 = ffxDestroyContext_Hook.call<ffxReturnCode_t>(&vr->vrContexts[1], NULL);
-            spdlog::info("Additional FSR context release result 0x{0:x}", (INT64)result2);
-            vr->vrContexts[1] = NULL;
-        }
-    }
-    return ffxDestroyContext_Hook.call<ffxReturnCode_t>(context, memCb);
-}
-
-ffxReturnCode_t hk_ffxDispatch(ffxContext* context, const ffxDispatchDescHeader* desc) {
-    auto vr = VR::get();
-    if (desc->type == FFX_API_DISPATCH_DESC_TYPE_UPSCALE) {
-        auto upscaleDesc = reinterpret_cast<const ffxDispatchDescUpscale*>(desc);
-
-        FfxApiResource depthApiResource = upscaleDesc->depth;
-        FfxApiResource mvApiResource = upscaleDesc->motionVectors;
-        float mvScaleX = upscaleDesc->motionVectorScale[0];
-        float mvScaleY = upscaleDesc->motionVectorScale[1];
-        if (vr->is_hmd_active() && depthApiResource.resource && mvApiResource.resource && vr->motionVectorsDesc.pTexture) {
-            auto InCmdList = (ID3D12GraphicsCommandList*)upscaleDesc->commandList;
-            auto depth = (ID3D12Resource*)depthApiResource.resource;
-            auto motionVectors = (ID3D12Resource*)mvApiResource.resource;
-            auto desc1 = motionVectors->GetDesc();
-            auto desc2 = vr->motionVectorsDesc.pTexture->GetDesc();
-            if ((desc1.Width == desc2.Width && desc1.Height == desc2.Height && desc1.Format == desc2.Format)) {
-                TextureDesc src;
-                src.pTexture = motionVectors;
-                vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc, src);
-                if (vr->foveatedDepthDesc.pTexture) {
-                    src.pTexture = depth;
-                    vr->d3d12Renderer->Copy(InCmdList, vr->foveatedDepthDesc, src);
-                }
-                if (vr->is_fix_dlss()) {
-                    EyeIndex nEye = (vr->get_vr_frame_count() % 2 == 0) ? EyeLeft : EyeRight;
-                    auto currHandle = vr->vrContexts[0];
-                    if (nEye == EyeLeft) {
-                        currHandle = vr->vrContexts[0];
-                    } else {
-                        currHandle = vr->vrContexts[1];
-                    }
-
-                    // current rendered eye
-                    auto result = ffxDispatch_Hook.call<ffxReturnCode_t>(&currHandle, desc);
-                    if (result != 0) {
-                        spdlog::error("Failed FSR 00, code = 0x{0:x}", result);
-                    }
-                    return result;
-                }
-            } else {
-                spdlog::error("hk_ffxDispatch motionVectorsTex mistmatch! Desc1:{}x{} {}  Desc2:{}x{} {}", desc1.Width,
-                    desc1.Height, (int)desc1.Format, desc2.Width, desc2.Height, (int)desc2.Format);
-            }
-        }
-    }
-    return ffxDispatch_Hook.call<ffxReturnCode_t>(context, desc);
-}
-
-static std::unordered_map<SIZE_T, ID3D12Resource*> rtvMap{};
-
-decltype(&ID3D12GraphicsCommandList::ClearRenderTargetView) ptrClearRenderTargetView; // 48
-void WINAPI hk_ID3D12GraphicsCommandList_ClearRenderTargetView(ID3D12GraphicsCommandList* This, D3D12_CPU_DESCRIPTOR_HANDLE RenderTargetView, const FLOAT  ColorRGBA[4], UINT NumRects, const D3D12_RECT* pRects)
-{
-    const auto& vr = VR::get();
-    if ((ColorRGBA[0] == 1.0f || ColorRGBA[1] == 1.0f) && rtvMap.contains(RenderTargetView.ptr)) {
-        auto rtvTex = rtvMap[RenderTargetView.ptr];
-        int eyeIndex = 0;
-        if (ColorRGBA[0] == 1.0f) {
-            //spdlog::info("Cleared RED! rtvTex = {:p}", (void*)rtvMap[RenderTargetView.ptr]);
-            eyeIndex = ColorRGBA[3] == 0 ? 0 : 1;
-        }
-        else if (ColorRGBA[1] == 1.0f) {
-            //spdlog::info("Cleared GREEN! rtvTex = {:p}", (void*)rtvMap[RenderTargetView.ptr]);
-            eyeIndex = ColorRGBA[3] == 0 ? 0 : 1;
-        }
-
-        static TextureDesc tempBufferDesc[2];
-        if (tempBufferDesc[eyeIndex].pTexture != rtvTex) {
-            tempBufferDesc[eyeIndex].pTexture = rtvTex;
-            tempBufferDesc[eyeIndex].initialState = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            vr->d3d12Renderer->SetupTextureDesc(tempBufferDesc[eyeIndex]);
-        }
-
-        if (!vr->multipassBackupDesc[eyeIndex].pTexture) {
-            auto desc = tempBufferDesc[eyeIndex].pTexture->GetDesc();
-            vr->d3d12Renderer->CreateTexture(desc.Width, desc.Height, desc.Format, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, vr->multipassBackupDesc[eyeIndex], true);
-        } else {
-            auto desc1 = vr->multipassBackupDesc[eyeIndex].pTexture->GetDesc();
-            auto desc2 = tempBufferDesc[eyeIndex].pTexture->GetDesc();
-            if (desc1.Width != desc2.Width || desc1.Height != desc2.Height || desc1.Format != desc2.Format) {
-                vr->d3d12Renderer->CreateTexture(desc2.Width, desc2.Height, desc2.Format, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, vr->multipassBackupDesc[eyeIndex], true);
-            }
-        }
-
-        if (vr->multipassBackupDesc[eyeIndex].pTexture) {
-            vr->d3d12Renderer->Copy(This, vr->multipassBackupDesc[eyeIndex], tempBufferDesc[eyeIndex]);
-        }
-        return;
-    }
-
-    return (This->*ptrClearRenderTargetView)(RenderTargetView, ColorRGBA, NumRects, pRects);
-}
-
-decltype(&ID3D12Device::CreateRenderTargetView) ptrCreateRenderTargetView; // 20
-void WINAPI hk_ID3D12Device_CreateRenderTargetView(ID3D12Device* This, ID3D12Resource* pResource, const D3D12_RENDER_TARGET_VIEW_DESC* pDesc, D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor) 
-{
-    (This->*ptrCreateRenderTargetView)(pResource, pDesc, DestDescriptor);
-    rtvMap[DestDescriptor.ptr] = pResource;
-}
 uintptr_t hookVtable(void* target, int index, void* detours) {
     uintptr_t* pVTable = *(uintptr_t**)target;
     DWORD dwOldProct = 0;
@@ -273,92 +104,6 @@ std::shared_ptr<VR>& VR::get() {
 // Called when the mod is initialized
 std::optional<std::string> VR::clean_initialize() try {
     ZoneScopedN(__FUNCTION__);
-
-    // #############################
-    // #Frame Warp Module Start
-    // #############################
-
-    if (GetModuleHandleW(L"PDAFWPlugin.dll") == nullptr) {
-        const auto current_path = utility::get_module_directoryw(GetModuleHandleW(L"UEVRBackend.dll"));
-        if (current_path) {
-            auto fspath = std::filesystem::path{*current_path} / L"PDAFWPlugin.dll";
-            if (LoadLibraryW(fspath.c_str()) == nullptr) {
-                spdlog::info("[VR] Could not load PDAFWPlugin.dll");
-            }
-        }
-    }
-
-    auto& hook = g_framework->get_d3d12_hook();
-    hook->get_command_queue();
-    pd::DeviceParams params{};
-    params.d3d12Device = hook->get_device();
-    params.d3d12Queue = hook->get_command_queue();
-    d3d12Renderer = InitDevice(params);
-
-    //*(uintptr_t*)&ptrCreateRenderTargetView = hookVtable(params.d3d12Device, 20, hk_ID3D12Device_CreateRenderTargetView);
-
-    //auto cmdList = d3d12Renderer->BeginCommandList(0);
-    //*(uintptr_t*)&ptrClearRenderTargetView = hookVtable(cmdList, 48, hk_ID3D12GraphicsCommandList_ClearRenderTargetView);
-    //d3d12Renderer->EndCommandList(0);
-    
-    auto dllNGX = GetModuleHandle("_nvngx.dll");
-    if (!dllNGX)
-        dllNGX = GetModuleHandle("nvngx.dll");
-    if (!dllNGX) {
-        spdlog::error("nvngx.dll not loaded!");
-    } else {
-        auto result = safetyhook::InlineHook::create(GetProcAddress(dllNGX, "NVSDK_NGX_D3D12_CreateFeature"), reinterpret_cast<void*>(hk_NVSDK_NGX_D3D12_CreateFeature));
-        if (!result) {
-            spdlog::error("Hook NVSDK_NGX_D3D12_CreateFeature Failed! {}", (INT)result.error().type);
-            return Mod::on_initialize();
-        }
-        NVSDK_NGX_D3D12_CreateFeature_Hook = std::move(result.value());
-        
-        result = safetyhook::InlineHook::create(GetProcAddress(dllNGX, "NVSDK_NGX_D3D12_ReleaseFeature"), reinterpret_cast<void*>(hk_NVSDK_NGX_D3D12_ReleaseFeature));
-        if (!result) {
-            spdlog::error("Hook NVSDK_NGX_D3D12_ReleaseFeature Failed! {}", (INT)result.error().type);
-            return Mod::on_initialize();
-        }
-        NVSDK_NGX_D3D12_ReleaseFeature_Hook = std::move(result.value());
-        
-        result = safetyhook::InlineHook::create(GetProcAddress(dllNGX, "NVSDK_NGX_D3D12_EvaluateFeature"), reinterpret_cast<void*>(hk_NVSDK_NGX_D3D12_EvaluateFeature));
-        if (!result) {
-            spdlog::error("Hook NVSDK_NGX_D3D12_EvaluateFeature Failed! {}", (INT)result.error().type);
-            return Mod::on_initialize();
-        }
-        NVSDK_NGX_D3D12_EvaluateFeature_Hook = std::move(result.value());
-    }
-    auto dllFfx = GetModuleHandle("amd_fidelityfx_upscaler_dx12.dll");
-    if (!dllFfx)
-        dllFfx = GetModuleHandle("amd_fidelityfx_loader_dx12.dll");
-    if (!dllFfx) {
-        spdlog::error("amd_fidelityfx_upscaler_dx12.dll not loaded!");
-    } else {
-        auto result = safetyhook::InlineHook::create(GetProcAddress(dllNGX, "ffxCreateContext"), reinterpret_cast<void*>(hk_ffxCreateContext));
-        if (!result) {
-            spdlog::error("Hook ffxCreateContext Failed! {}", (INT)result.error().type);
-            return Mod::on_initialize();
-        }
-        ffxCreateContext_Hook = std::move(result.value());
-        
-        result = safetyhook::InlineHook::create(GetProcAddress(dllNGX, "ffxDestroyContext"), reinterpret_cast<void*>(hk_ffxDestroyContext));
-        if (!result) {
-            spdlog::error("Hook ffxDestroyContext Failed! {}", (INT)result.error().type);
-            return Mod::on_initialize();
-        }
-        ffxDestroyContext_Hook = std::move(result.value());
-        
-        result = safetyhook::InlineHook::create(GetProcAddress(dllNGX, "ffxDispatch"), reinterpret_cast<void*>(hk_ffxDispatch));
-        if (!result) {
-            spdlog::error("Hook ffxDispatch Failed! {}", (INT)result.error().type);
-            return Mod::on_initialize();
-        }
-        ffxDispatch_Hook = std::move(result.value());
-    }
-
-    // #############################
-    // #Frame Warp Module End
-    // #############################
 
     auto openvr_error = initialize_openvr();
 
@@ -399,6 +144,62 @@ std::optional<std::string> VR::clean_initialize() try {
     }
 
     m_init_finished = true;
+
+    // #############################
+    // #Frame Warp Module Start
+    // #############################
+
+    if (GetModuleHandleW(L"PDAFWPlugin.dll") == nullptr) {
+        const auto current_path = utility::get_module_directoryw(GetModuleHandleW(L"UEVRBackend.dll"));
+        if (current_path) {
+            auto fspath = std::filesystem::path{*current_path} / L"PDAFWPlugin.dll";
+            if (LoadLibraryW(fspath.c_str()) == nullptr) {
+                spdlog::info("[VR] Could not load PDAFWPlugin.dll");
+            }
+        }
+    }
+
+    auto& hook = g_framework->get_d3d12_hook();
+    hook->get_command_queue();
+    pd::DeviceParams params{};
+    params.d3d12Device = hook->get_device();
+    params.d3d12Queue = hook->get_command_queue();
+    d3d12Renderer = InitDevice(params);
+
+    auto dllNGX = GetModuleHandle("_nvngx.dll");
+    if (!dllNGX)
+        dllNGX = GetModuleHandle("nvngx.dll");
+    if (!dllNGX) {
+        spdlog::error("nvngx.dll not loaded!");
+    } else {
+        auto result = safetyhook::InlineHook::create(
+            GetProcAddress(dllNGX, "NVSDK_NGX_D3D12_CreateFeature"), reinterpret_cast<void*>(hk_NVSDK_NGX_D3D12_CreateFeature));
+        if (!result) {
+            spdlog::error("Hook NVSDK_NGX_D3D12_CreateFeature Failed! {}", (INT)result.error().type);
+            return Mod::on_initialize();
+        }
+        NVSDK_NGX_D3D12_CreateFeature_Hook = std::move(result.value());
+
+        result = safetyhook::InlineHook::create(
+            GetProcAddress(dllNGX, "NVSDK_NGX_D3D12_ReleaseFeature"), reinterpret_cast<void*>(hk_NVSDK_NGX_D3D12_ReleaseFeature));
+        if (!result) {
+            spdlog::error("Hook NVSDK_NGX_D3D12_ReleaseFeature Failed! {}", (INT)result.error().type);
+            return Mod::on_initialize();
+        }
+        NVSDK_NGX_D3D12_ReleaseFeature_Hook = std::move(result.value());
+
+        result = safetyhook::InlineHook::create(
+            GetProcAddress(dllNGX, "NVSDK_NGX_D3D12_EvaluateFeature"), reinterpret_cast<void*>(hk_NVSDK_NGX_D3D12_EvaluateFeature));
+        if (!result) {
+            spdlog::error("Hook NVSDK_NGX_D3D12_EvaluateFeature Failed! {}", (INT)result.error().type);
+            return Mod::on_initialize();
+        }
+        NVSDK_NGX_D3D12_EvaluateFeature_Hook = std::move(result.value());
+    }
+
+    // #############################
+    // #Frame Warp Module End
+    // #############################
 
     // all OK
     return Mod::on_initialize();
@@ -624,8 +425,8 @@ std::optional<std::string> VR::initialize_openxr() {
                 }
 
                 const std::unordered_set<std::string> wanted_extensions {
-                    XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
-                    XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
+                    //XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME,
+                    //XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME
                     // To be seen if we need more!
                 };
 
@@ -1903,7 +1704,8 @@ void VR::update_hmd_state(bool from_view_extensions, uint32_t frame_count) {
 
         // Forcefully disable motion blur because it freaks out with AFR
         sdk::set_cvar_data_int(L"Engine", L"r.DefaultFeature.MotionBlur", 0);
-        return;
+        if (!is_using_afw())
+            return;
     }
     
     runtime->update_poses(from_view_extensions, frame_count);
@@ -2380,8 +2182,83 @@ void VR::on_frame() {
     }
 }
 
+glm::mat4 to_reverseZ(const glm::mat4& proj) {
+
+	glm::mat4 transformMat = glm::mat4(
+		1, 0, 0, 0,
+		0, 1, 0, 0,
+		0, 0, -1,0,
+		0, 0, 1, 1
+	);
+
+    return transformMat * proj;
+}
+
+void VR::update_camera_data(int frame_count) {
+
+    if (last_update_camera_data_frame_count < frame_count || last_update_camera_data_frame_count > (frame_count + 100)) {
+        last_update_camera_data_frame_count = frame_count;
+
+        std::shared_lock _{get_runtime()->eyes_mtx};
+
+        EyeIndex nEye = (m_render_frame_count % 2 == m_left_eye_interval) ? EyeLeft : EyeRight;
+        EyeIndex nEyeOther = (m_render_frame_count % 2 == m_left_eye_interval) ? EyeRight : EyeLeft;
+        auto offset = last_update_matrix_frame_count[nEye] - last_update_camera_data_frame_count;
+        offset = std::clamp(offset, 0, 2) / 2;
+        cameraData[nEye].camWorldToViewMatrix = glm::mat4(); // not used
+        cameraData[nEye].camViewToWorldMatrix = glm::mat4(); // not used
+        cameraData[nEye].destWorldToViewMatrix = render_view_matrix[nEye][offset].other;
+        cameraData[nEye].srcWorldToViewMatrix = render_view_matrix[nEye][offset].curr;
+        cameraData[nEye].destViewToWorldMatrix = glm::inverse(cameraData[nEye].destWorldToViewMatrix);
+        cameraData[nEye].srcViewToWorldMatrix = glm::inverse(cameraData[nEye].srcWorldToViewMatrix);
+
+        cameraData[nEye].destViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].other);
+        cameraData[nEye].srcViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].curr);
+        cameraData[nEye].destClipToViewMatrix = glm::inverse(cameraData[nEye].destViewToClipMatrix);
+        cameraData[nEye].srcClipToViewMatrix = glm::inverse(cameraData[nEye].srcViewToClipMatrix);
+        cameraData[nEye].camViewToClipMatrix = glm::mat4(); // not used
+        cameraData[nEye].camClipToViewMatrix = glm::mat4(); // not used
+    }
+}
+
 void VR::on_present() {
     ZoneScopedN(__FUNCTION__);
+
+    static bool btn1 = false;
+    if (GetAsyncKeyState(VK_NUMPAD1) < 0 && btn1 == false) {
+        btn1 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD1) == 0 && btn1 == true) {
+        btn1 = false;
+        mDebug1 = !mDebug1;
+    }
+    static bool btn2 = false;
+    if (GetAsyncKeyState(VK_NUMPAD2) < 0 && btn2 == false) {
+        btn2 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD2) == 0 && btn2 == true) {
+        btn2 = false;
+        mDebug2 = !mDebug2;
+        // m_disable_volumetric_fog->toggle();
+    }
+    static bool btn3 = false;
+    if (GetAsyncKeyState(VK_NUMPAD3) < 0 && btn3 == false) {
+        btn3 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD3) == 0 && btn3 == true) {
+        btn3 = false;
+        mDebug3 = !mDebug3;
+        mDebug2 = false;
+        mDebug1 = false;
+    }
+    static bool btn4 = false;
+    if (GetAsyncKeyState(VK_NUMPAD4) < 0 && btn4 == false) {
+        btn4 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD4) == 0 && btn4 == true) {
+        btn4 = false;
+        m_fix_upscalers_wobbling->toggle();
+    }
 
     m_present_thread_id = GetCurrentThreadId();
 
@@ -2448,6 +2325,80 @@ void VR::on_present() {
     // attempt to fix crash when reinitializing openvr
     std::scoped_lock _{m_openvr_mtx};
     m_submitted = false;
+
+    static bool btn5 = false;
+    if (GetAsyncKeyState(VK_NUMPAD5) < 0 && btn5 == false) {
+        btn5 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD5) == 0 && btn5 == true) {
+        btn5 = false;
+        auto& value = m_framewarp_mode->value();
+        if (value == FrameWarpMode::AlternateEyeWarping)
+            value = FrameWarpMode::PreviousFrameWarping;
+        else if (value == FrameWarpMode::PreviousFrameWarping)
+            value = FrameWarpMode::CombinedWarping;
+        else if (value == FrameWarpMode::CombinedWarping)
+            value = FrameWarpMode::AlternateEyeWarping;
+    }
+    static bool btn6 = false;
+    if (GetAsyncKeyState(VK_NUMPAD6) < 0 && btn6 == false) {
+        btn6 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD6) == 0 && btn6 == true) {
+        btn6 = false;
+        m_framewarp_debug->toggle();
+    }
+    static bool btn7 = false;
+    if (GetAsyncKeyState(VK_NUMPAD7) < 0 && btn7 == false) {
+        btn7 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD7) == 0 && btn7 == true) {
+        btn7 = false;
+        m_clear_before_framewarp->toggle();
+    }
+    static bool btn8 = false;
+    if (GetAsyncKeyState(VK_NUMPAD8) < 0 && btn8 == false) {
+        btn8 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD8) == 0 && btn8 == true) {
+        btn8 = false;
+    }
+    static bool btn9 = false;
+    if (GetAsyncKeyState(VK_NUMPAD9) < 0 && btn9 == false) {
+        btn9 = true;
+    }
+    if (GetAsyncKeyState(VK_NUMPAD9) == 0 && btn9 == true) {
+        btn9 = false;
+        m_enable_ui_fix->toggle();
+    }
+    static bool btnAdd = false;
+    if (GetAsyncKeyState(VK_ADD) < 0 && btnAdd == false) {
+        btnAdd = true;
+    }
+    if (GetAsyncKeyState(VK_ADD) == 0 && btnAdd == true) {
+        btnAdd = false;
+        auto& sharpness = m_sharpness->value();
+        sharpness += 0.05f;
+    }
+    static bool btnSub = false;
+    if (GetAsyncKeyState(VK_SUBTRACT) < 0 && btnSub == false) {
+        btnSub = true;
+    }
+    if (GetAsyncKeyState(VK_SUBTRACT) == 0 && btnSub == true) {
+        btnSub = false;
+        auto& sharpness = m_sharpness->value();
+        sharpness -= 0.05f;
+    }
+    static bool btnMul = false;
+    if (GetAsyncKeyState(VK_MULTIPLY) < 0 && btnMul == false) {
+        btnMul = true;
+    }
+    if (GetAsyncKeyState(VK_MULTIPLY) == 0 && btnMul == true) {
+        btnMul = false;
+        m_enable_sharpening->toggle();
+    }
+
+    update_camera_data(m_render_frame_count);
 
     const auto renderer = g_framework->get_renderer_type();
     vr::EVRCompositorError e = vr::EVRCompositorError::VRCompositorError_None;

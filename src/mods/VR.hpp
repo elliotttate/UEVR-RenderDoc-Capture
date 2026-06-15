@@ -30,22 +30,16 @@
 class VR : public Mod {
 public:
     CameraData cameraData[2];
-    CameraDataMVCorrection cameraDataForMV[2];
-    ID3D12Resource* depthTex[2] = {NULL, NULL};
-    ID3D12Resource* uiBufferTex[2] = {NULL, NULL};
     D3D12RendererAPI* d3d12Renderer = nullptr;
 
+    ID3D12Resource* rawDepthTex = NULL;
     ID3D12Resource* rawMotionVectorsTex = NULL;
 
-    TextureDesc uiBufferDesc[2];
-    TextureDesc depthDesc[2];
-    TextureDesc motionVectorsDesc;
-    TextureDesc motionVectorsCorrectedDesc;
+    TextureDesc uiBufferDesc{};
+    TextureDesc depthDesc[2]{{}, {}};
+    TextureDesc motionVectorsDesc[2]{{}, {}};
 
-    TextureDesc foveatedDepthDesc;
-    TextureDesc multipassBackupDesc[2];
-
-    TextureDesc multipassUIBufferDesc;
+    float mvScale[2] = {1.0, 1.0};
 
     bool mDebug1 = false;
     bool mDebug2 = false;
@@ -55,14 +49,21 @@ public:
     uint32_t render_size[2] = {0, 0};
 
     NVSDK_NGX_Handle* vrDLSSHandle[2] = {NULL, NULL};
-    ffxContext vrContexts[2] = {NULL, NULL};
+    ffxContext vrFfxContexts[2] = {NULL, NULL};
+    xess_context_handle_t vrXessContexts[2] = {NULL, NULL};
 
-    std::array<Matrix4x4f, 2> oldViewMatrix{};
-    std::array<Matrix4x4f, 2> oldFoveatedProjectionMatrix{};
+    struct MatrixPair {
+        Matrix4x4f curr;
+        Matrix4x4f other;
+    };
+    MatrixPair render_view_matrix[2][3]{};
+    MatrixPair render_projection_matrix[2]{};
+    int last_update_matrix_frame_count[2] = {0, 0};
 
     int last_update_camera_data_frame_count = 0;
     void update_camera_data(int frame_count);
 
+    int get_render_frame_count() { return m_render_frame_count; };
     int get_vr_frame_count() { return m_frame_count; };
     bool is_left_eye() { return m_frame_count % 2 == m_left_eye_interval; };
 
