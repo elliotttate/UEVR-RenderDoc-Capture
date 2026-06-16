@@ -36,10 +36,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_CreateFeature(
     InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flag);
     spdlog::info("hk_NVSDK_NGX_D3D12_CreateFeature 0x{0:x}", (INT64)result);
     if ((InFeatureID == NVSDK_NGX_Feature_SuperSampling || InFeatureID == NVSDK_NGX_Feature_RayReconstruction)) {
-        if (vr->vrDLSSHandle[0] == NULL)
-            vr->vrDLSSHandle[0] = *OutHandle;
-        else
-            vr->vrDLSSHandle[1] = *OutHandle;
+        vr->vrDLSSHandleMap[*OutHandle] = InFeatureID;
     }
     return result;
 }
@@ -49,19 +46,15 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* InHandle) {
     auto result = NVSDK_NGX_D3D12_ReleaseFeature_Hook.call<NVSDK_NGX_Result>(InHandle);
     spdlog::info("hk_NVSDK_NGX_D3D12_ReleaseFeature 0x{0:x}", (INT64)result);
     const auto& vr = VR::get();
-    if (vr->vrDLSSHandle[0] == InHandle) {
-        vr->vrDLSSHandle[0] = NULL;
-    }
-    if (vr->vrDLSSHandle[1] == InHandle) {
-        vr->vrDLSSHandle[1] = NULL;
-    }
+    if (vr->vrDLSSHandleMap.contains(InHandle))
+        vr->vrDLSSHandleMap.erase(InHandle);
     return result;
 }
 
 NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
     ID3D12GraphicsCommandList* InCmdList, const NVSDK_NGX_Handle* InFeatureHandle, NVSDK_NGX_Parameter* InParameters, void* InCallback) {
     const auto& vr = VR::get();
-    if (InFeatureHandle == vr->vrDLSSHandle[0] || InFeatureHandle == vr->vrDLSSHandle[1]) {
+    if (vr->vrDLSSHandleMap.contains((NVSDK_NGX_Handle*)InFeatureHandle)) {
         ID3D12Resource* color;
         ID3D12Resource* depth;
         ID3D12Resource* motionVectors;

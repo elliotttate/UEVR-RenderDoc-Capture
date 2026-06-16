@@ -475,14 +475,8 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         vr->d3d12Renderer->SetupTextureDesc(realBackbufferDesc[backbuffer_index]);
     }
 
-    static TextureDesc rawDepthDesc[6];
     if (vr->rawDepthTex) {
         auto desc = vr->rawDepthTex->GetDesc();
-        if (rawDepthDesc[backbuffer_index].pTexture != vr->rawDepthTex) {
-            rawDepthDesc[backbuffer_index].pTexture = vr->rawDepthTex;
-            rawDepthDesc[backbuffer_index].initialState = D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE;
-            vr->d3d12Renderer->SetupTextureDesc(rawDepthDesc[backbuffer_index]);
-        }
         vr->rawDepthTex = NULL;
         for (int i = 0; i < 2; i++) {
             if (vr->depthDesc[i].pTexture == NULL || vr->depthDesc[i].pTexture->GetDesc().Width != desc.Width ||
@@ -520,7 +514,6 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             .bottom = m_backbuffer_size[1],
             .back = 1};
 
-        vr->d3d12Renderer->Copy(cmdList, vr->depthDesc[nEye], rawDepthDesc[backbuffer_index]);
         vr->d3d12Renderer->Crop(cmdList, eyeFrameBuffer.color, backbufferDesc[backbuffer_index], src_box);
         FLOAT black[4] = {0, 0, 0, 0};
         //if (vr->mDebug1) {

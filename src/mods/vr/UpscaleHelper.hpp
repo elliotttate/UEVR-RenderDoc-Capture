@@ -4,6 +4,7 @@
 #define NVSDK_NGX_Result_Success 0x1
 typedef int NVSDK_NGX_Result;
 typedef enum NVSDK_NGX_Feature {
+    NVSDK_NGX_Feature_None = 0,
     NVSDK_NGX_Feature_SuperSampling = 1,
     NVSDK_NGX_Feature_RayReconstruction = 13,
 } NVSDK_NGX_Feature;

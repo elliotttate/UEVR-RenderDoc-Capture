@@ -48,9 +48,7 @@ public:
 
     uint32_t render_size[2] = {0, 0};
 
-    NVSDK_NGX_Handle* vrDLSSHandle[2] = {NULL, NULL};
-    ffxContext vrFfxContexts[2] = {NULL, NULL};
-    xess_context_handle_t vrXessContexts[2] = {NULL, NULL};
+    std::map <NVSDK_NGX_Handle*, NVSDK_NGX_Feature> vrDLSSHandleMap;
 
     struct MatrixPair {
         Matrix4x4f curr;
