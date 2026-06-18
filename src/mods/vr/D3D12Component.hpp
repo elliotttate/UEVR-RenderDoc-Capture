@@ -16,14 +16,20 @@
 #include <../../directxtk12-src/Inc/GraphicsMemory.h>
 #include <../../directxtk12-src/Inc/SpriteBatch.h>
 #include <../../directxtk12-src/Inc/DescriptorHeap.h>
+#include <../../directxtk12-src/Src/d3dx12.h>
 
 #include "d3d12/CommandContext.hpp"
 #include "d3d12/TextureContext.hpp"
+
+#include "PDAFWPlugin.h"
 
 class VR;
 
 namespace vrmod {
 class D3D12Component {
+public:
+    EyeFrameBuffers m_eyeFrameBuffers;
+
 public:
     D3D12Component() 
         : m_openvr{this}
@@ -152,8 +158,8 @@ private:
             ctx.commands.execute();
         }
 
-        std::array<d3d12::TextureContext, 3> left_eye_tex{};
-        std::array<d3d12::TextureContext, 3> right_eye_tex{};
+        std::array<d3d12::TextureContext, 1> left_eye_tex{};
+        std::array<d3d12::TextureContext, 1> right_eye_tex{};
         d3d12::TextureContext ui_tex{};
         uint32_t texture_counter{0};
         D3D12Component* parent{};

@@ -23,12 +23,61 @@
 #undef max
 #include <tracy/Tracy.hpp>
 
+#include "PDAFWPlugin.h"
+
+#include "vr/UpscaleHelper.hpp"
+
 class VR : public Mod {
+public:
+    CameraData cameraData[2];
+    CameraDataMVCorrection cameraDataForMV[2];
+    D3D12RendererAPI* d3d12Renderer = nullptr;
+
+    ID3D12Resource* rawDepthTex = NULL;
+    ID3D12Resource* rawMotionVectorsTex = NULL;
+
+    TextureDesc uiBufferDesc{};
+    TextureDesc depthDesc[2]{{}, {}};
+    TextureDesc motionVectorsDesc[2]{{}, {}};
+
+    float mvScale[2] = {1.0, 1.0};
+
+    bool mDebug1 = false;
+    bool mDebug2 = false;
+    bool mDebug3 = false;
+    int mDebug5 = 0;
+
+    uint32_t render_size[2] = {0, 0};
+
+    NVSDK_NGX_Handle* vrDLSSHandle[2] = {NULL, NULL};
+    ffxContext vrFfxContexts[2] = {NULL, NULL};
+    xess_context_handle_t vrXessContexts[2] = {NULL, NULL};
+
+    struct MatrixPair {
+        Matrix4x4f curr;
+        Matrix4x4f other;
+    };
+    MatrixPair render_view_matrix[2][3]{};
+    MatrixPair render_projection_matrix[2]{};
+    int last_update_matrix_frame_count[2] = {0, 0};
+
+    int last_update_camera_data_frame_count = 0;
+    void update_camera_data(int frame_count);
+
+    int get_render_frame_count() { return m_render_frame_count; };
+    int get_vr_frame_count() { return m_frame_count; };
+    bool is_left_eye() { return m_frame_count % 2 == m_left_eye_interval; };
+
+    bool is_fix_dlss() { return m_fix_upscalers_wobbling->value(); };
+    bool is_enable_sharpening() { return m_enable_sharpening->value(); };
+    float get_sharpness() { return m_sharpness->value(); };
+
 public:
     enum RenderingMethod {
         NATIVE_STEREO = 0,
         SYNCHRONIZED = 1,
         ALTERNATING = 2,
+        ALTERNATE_FRAMEWARP = 3,
     };
 
     enum SynchronizeStage {
@@ -408,6 +457,7 @@ public:
     bool is_using_afr() const {
         return m_rendering_method->value() == RenderingMethod::ALTERNATING || 
                m_rendering_method->value() == RenderingMethod::SYNCHRONIZED ||
+               m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP ||
                m_extreme_compat_mode->value() == true;
     }
 
@@ -415,6 +465,9 @@ public:
         return m_rendering_method->value() == RenderingMethod::SYNCHRONIZED ||
                (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO);
     }
+
+    bool is_using_afw() const { return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP; }
+
 
     SynchronizeStage get_synchronize_stage() {
         return (SynchronizeStage) m_sync_mode->value();
@@ -837,6 +890,7 @@ private:
         "Native Stereo",
         "Synchronized Sequential",
         "Alternating/AFR",
+        "Alternate Frame Warping",
     };
 
     static const inline std::vector<std::string> s_sync_mode_names{
@@ -902,6 +956,23 @@ private:
     const ModCombo::Ptr m_vertical_projection_override{ModCombo::create(generate_name("VerticalProjectionOverride"), s_vertical_projection_override_names)};
     const ModToggle::Ptr m_grow_rectangle_for_projection_cropping{ModToggle::create(generate_name("GrowRectangleForProjectionCropping"), false)};
     const ModCombo::Ptr m_sync_mode{ ModCombo::create(generate_name("SynchronizationMode"), s_sync_mode_names, 2) };
+        
+    const ModToggle::Ptr m_clear_before_framewarp{ModToggle::create(generate_name("ClearBeforeFramewarp"), false)};
+    const ModToggle::Ptr m_enable_ui_fix{ModToggle::create(generate_name("EnableUIFix"), true)};
+    const ModToggle::Ptr m_enable_sharpening{ModToggle::create(generate_name("EnableSharpening"), true)};
+    const ModToggle::Ptr m_fix_upscalers_wobbling{ModToggle::create(generate_name("UpscalersWobblingFix"), true)};
+    const ModSlider::Ptr m_sharpness{ModSlider::create(generate_name("Sharpness"), 0.0f, 1.0f, 0.6f)};
+    const ModToggle::Ptr m_framewarp_debug{ModToggle::create(generate_name("FramewarpDebug"), false)};
+    const ModSlider::Ptr m_ignore_motion_threshold{ModSlider::create(generate_name("IgnoreMotionThreshold"), 1.0f, 100.0f, 2.5f)};
+    const ModCombo::Ptr m_framewarp_mode{ModCombo::create(generate_name("FramewarpMode"),
+        {
+            "None",
+            "AlternateEyeWarping",
+            "PreviousFrameWarping",
+            "CombinedWarping"
+        },
+        (int)FrameWarpMode::CombinedWarping)
+    };
 
     // Snap turn settings and globals
     void gamepad_snapturn(XINPUT_STATE& state);
@@ -1096,6 +1167,11 @@ public:
             *m_lerp_camera_roll,
             *m_lerp_camera_speed,
             *m_sync_mode,
+            *m_enable_ui_fix,
+            *m_framewarp_mode,
+            *m_enable_sharpening,
+            *m_sharpness,
+            *m_fix_upscalers_wobbling,
         };
 
         add_components_vr();
