@@ -79,7 +79,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
             TextureDesc src;
             src.pTexture = depth;
             vr->d3d12Renderer->Copy(InCmdList, vr->depthDesc[nEye], src);
-            if (vr->mDebug3) {
+            if (vr->is_ghosting_fix_enabled() && vr->is_fix_object_motion_vector()) {
                 static TextureDesc rawMVDesc[2];
                 if (vr->rawMotionVectorsTex) {
                     auto desc = vr->rawMotionVectorsTex->GetDesc();
@@ -2336,7 +2336,6 @@ void VR::on_present() {
     if (GetAsyncKeyState(VK_NUMPAD2) == 0 && btn2 == true) {
         btn2 = false;
         mDebug2 = !mDebug2;
-        // m_disable_volumetric_fog->toggle();
     }
     static bool btn3 = false;
     if (GetAsyncKeyState(VK_NUMPAD3) < 0 && btn3 == false) {
@@ -2354,7 +2353,7 @@ void VR::on_present() {
     }
     if (GetAsyncKeyState(VK_NUMPAD4) == 0 && btn4 == true) {
         btn4 = false;
-        m_fix_upscalers_wobbling->toggle();
+        m_fix_object_motion_vector->toggle();
     }
 
     m_present_thread_id = GetCurrentThreadId();
@@ -2786,7 +2785,19 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
 
     if (selected_page == PAGE_UNREAL) {
         m_rendering_method->draw("Rendering Method");
-        m_synced_afr_method->draw("Synced Sequential Method");
+        if (is_using_synchronized_afr())
+            m_synced_afr_method->draw("Synced Sequential Method");
+
+        if (is_using_afw()) {
+            m_clear_before_framewarp->draw("Clear Before Framewarp");
+            m_framewarp_debug->draw("Debug Framewarp");
+            m_enable_ui_fix->draw("Enable Framewarp UI Fix");
+            m_fix_object_motion_vector->draw("Fix Object Motion Vector");
+            m_enable_sharpening->draw("Enable Sharpening");
+            m_sharpness->draw("Sharpness");
+            m_ignore_motion_threshold->draw("Ignore Motion Threshold");
+        }
+        ImGui::Separator();
 
         m_world_scale->draw("World Scale");
         m_depth_scale->draw("Depth Scale");
