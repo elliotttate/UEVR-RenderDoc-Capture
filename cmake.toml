@@ -164,6 +164,38 @@ type = "plugin"
 sources = ["examples/example_plugin/**.cpp", "examples/example_plugin/**.c"]
 headers = ["examples/example_plugin/**.hpp", "examples/example_plugin/**.h"]
 
+# AFW frame resource provider: decoupled depth/velocity discovery exposed through a
+# versioned C ABI. This plugin provides resources only; PureDark's AFW path remains
+# the consumer.
+[target.afw_frame_resources]
+type = "plugin"
+sources = [
+    "plugins/afw_frame_resources/*.cpp",
+    "plugins/afw_frame_resources/providers/*.cpp",
+]
+headers = [
+    "plugins/afw_frame_resources/*.hpp",
+    "plugins/afw_frame_resources/providers/*.hpp",
+    "plugins/afw_frame_resources/include/*.h",
+]
+
+# Offline self-test for the provider core. It links only the uevr-free tracker state
+# machine so it can run without launching a game.
+[target.afw_frame_resources_selftest]
+type = "executable"
+sources = [
+    "plugins/afw_frame_resources/FrameResourceTracker.cpp",
+    "plugins/afw_frame_resources/FrameResourceLog.cpp",
+    "plugins/afw_frame_resources/tools/selftest_main.cpp",
+]
+headers = [
+    "plugins/afw_frame_resources/FrameResourceTracker.hpp",
+    "plugins/afw_frame_resources/FrameResourceTypes.hpp",
+    "plugins/afw_frame_resources/FrameResourceLog.hpp",
+]
+include-directories = ["plugins/afw_frame_resources"]
+compile-features = ["cxx_std_23"]
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
@@ -243,6 +275,7 @@ include-directories = [
     "shared/", 
     "src/", 
     "include/", 
+    "plugins/afw_frame_resources/include",
     "${OPENXR_SOURCE_DIR}/src"
 ]
 compile-options = ["/GS-", "/bigobj", "/EHa", "/MP"]

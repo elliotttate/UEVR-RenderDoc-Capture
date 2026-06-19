@@ -16,12 +16,63 @@
 
 #include "d3d12/DirectXTK.hpp"
 
+#include "AFWFrameResourcesBridge.hpp"
 #include "D3D12Component.hpp"
 
 //#define AFR_DEPTH_TEMP_DISABLED
 
 constexpr auto ENGINE_SRC_DEPTH = D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 constexpr auto ENGINE_SRC_COLOR = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+
+namespace {
+struct AfwProviderResource {
+    UEVR_FrameResourceView view{};
+    ID3D12Resource* texture{nullptr};
+};
+
+bool get_provider_resource(bool velocity, AfwProviderResource& out) {
+    if (!uevr_afw_bridge::enabled() || !uevr_afw_bridge::available()) {
+        return false;
+    }
+
+    const bool ok = velocity ? uevr_afw_bridge::get_latest_velocity(&out.view)
+                             : uevr_afw_bridge::get_latest_depth(&out.view);
+    if (!ok || out.view.d3d12_resource == nullptr) {
+        return false;
+    }
+
+    out.texture = static_cast<ID3D12Resource*>(out.view.d3d12_resource);
+    return true;
+}
+
+void resize_afw_inputs(VR* vr, TextureDesc (&dest)[2], ID3D12Resource* source, DXGI_FORMAT override_format = DXGI_FORMAT_UNKNOWN) {
+    if (vr == nullptr || vr->d3d12Renderer == nullptr || source == nullptr) {
+        return;
+    }
+
+    const auto desc = source->GetDesc();
+    const auto format = override_format == DXGI_FORMAT_UNKNOWN ? desc.Format : override_format;
+    for (int i = 0; i < 2; ++i) {
+        if (dest[i].pTexture == nullptr || dest[i].pTexture->GetDesc().Width != desc.Width ||
+            dest[i].pTexture->GetDesc().Height != desc.Height || dest[i].pTexture->GetDesc().Format != format) {
+            vr->d3d12Renderer->CreateTexture(
+                static_cast<int>(desc.Width), static_cast<int>(desc.Height), format,
+                D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, dest[i], true);
+        }
+    }
+}
+
+void copy_provider_resource(VR* vr, ID3D12GraphicsCommandList* cmd_list, TextureDesc& dest, ID3D12Resource* source) {
+    if (vr == nullptr || vr->d3d12Renderer == nullptr || cmd_list == nullptr || dest.pTexture == nullptr || source == nullptr) {
+        return;
+    }
+
+    TextureDesc src{};
+    src.pTexture = source;
+    vr->d3d12Renderer->SetupTextureDesc(src);
+    vr->d3d12Renderer->Copy(cmd_list, dest, src);
+}
+}
 
 namespace vrmod {
 vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
@@ -444,7 +495,24 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     const auto eye_width = static_cast<uint32_t>(bb_desc.Width / 2);
     const auto eye_height = static_cast<uint32_t>(bb_desc.Height);
 
-    if (!vr->rawDepthTex) {
+    AfwProviderResource provider_depth{};
+    AfwProviderResource provider_velocity{};
+    const bool provider_depth_valid = get_provider_resource(false, provider_depth);
+    const bool provider_velocity_valid = uevr_afw_bridge::use_velocity() && get_provider_resource(true, provider_velocity);
+    bool using_provider_depth = false;
+    bool using_provider_velocity = false;
+
+    if (!vr->rawDepthTex && provider_depth_valid) {
+        vr->rawDepthTex = provider_depth.texture;
+        using_provider_depth = true;
+    }
+
+    if (!vr->rawMotionVectorsTex && provider_velocity_valid) {
+        vr->rawMotionVectorsTex = provider_velocity.texture;
+        using_provider_velocity = true;
+    }
+
+    if (!vr->rawDepthTex && (!uevr_afw_bridge::enabled() || uevr_afw_bridge::legacy_fallback())) {
         auto& rt_pool = vr->get_render_target_pool_hook();
         scene_depth_tex = rt_pool->get_texture<ID3D12Resource>(L"SceneDepthZ");
         if (scene_depth_tex)
@@ -476,26 +544,14 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
     }
 
     if (vr->rawDepthTex) {
-        auto desc = vr->rawDepthTex->GetDesc();
+        auto* raw_depth = vr->rawDepthTex;
         vr->rawDepthTex = NULL;
-        for (int i = 0; i < 2; i++) {
-            if (vr->depthDesc[i].pTexture == NULL || vr->depthDesc[i].pTexture->GetDesc().Width != desc.Width ||
-                vr->depthDesc[i].pTexture->GetDesc().Height != desc.Height) {
-                vr->d3d12Renderer->CreateTexture(
-                    desc.Width, desc.Height, desc.Format, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, vr->depthDesc[i], true);
-            }
-        }
+        resize_afw_inputs(vr, vr->depthDesc, raw_depth);
     }
     if (vr->rawMotionVectorsTex) {
-        auto desc = vr->rawMotionVectorsTex->GetDesc();
+        auto* raw_motion_vectors = vr->rawMotionVectorsTex;
         vr->rawMotionVectorsTex = NULL;
-        for (int i = 0; i < 2; i++) {
-            if (vr->motionVectorsDesc[i].pTexture == NULL || vr->motionVectorsDesc[i].pTexture->GetDesc().Width != desc.Width ||
-                vr->motionVectorsDesc[i].pTexture->GetDesc().Height != desc.Height) {
-                vr->d3d12Renderer->CreateTexture(desc.Width, desc.Height, DXGI_FORMAT_R16G16_FLOAT,
-                    D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, vr->motionVectorsDesc[i], true);
-            }
-        }
+        resize_afw_inputs(vr, vr->motionVectorsDesc, raw_motion_vectors, DXGI_FORMAT_R16G16_FLOAT);
     }
 
     auto cmdList = vr->d3d12Renderer->BeginCommandList(backbuffer_index);
@@ -520,6 +576,13 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         //    vr->d3d12Renderer->Clear(cmdList, vr->motionVectorsDesc[nEye], black);
         //}
 
+        if (using_provider_depth) {
+            copy_provider_resource(vr, cmdList, vr->depthDesc[nEye], provider_depth.texture);
+        }
+        if (using_provider_velocity) {
+            copy_provider_resource(vr, cmdList, vr->motionVectorsDesc[nEye], provider_velocity.texture);
+        }
+
         s_CurrentEyeFrameBuffer.color = eyeFrameBuffer.color;
         s_CurrentEyeFrameBuffer.depth = vr->depthDesc[nEye];
         s_CurrentEyeFrameBuffer.motionVectors = vr->motionVectorsDesc[nEye];
@@ -532,9 +595,9 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
         params.InEyeFrameBuffer = &s_CurrentEyeFrameBuffer;
         params.InUIColorAlpha = NULL;
         params.IsHudlessColor = true;
-        params.MotionVectorsType = vr->is_fix_dlss() ? Normal : FromOtherEye;
-        params.InMotionScale[0] = vr->mvScale[0];
-        params.InMotionScale[1] = vr->mvScale[1];
+        params.MotionVectorsType = (vr->is_fix_dlss() || using_provider_velocity) ? Normal : FromOtherEye;
+        params.InMotionScale[0] = using_provider_velocity ? provider_velocity.view.motion_scale_x : vr->mvScale[0];
+        params.InMotionScale[1] = using_provider_velocity ? provider_velocity.view.motion_scale_y : vr->mvScale[1];
         params.Mode = (FrameWarpMode)vr->m_framewarp_mode->value();
         params.EyeIndex = nEye;
         params.ClearBeforeWarping = vr->m_clear_before_framewarp->value();
