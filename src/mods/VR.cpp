@@ -35,10 +35,7 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_CreateFeature(
     InParameters->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &flag);
     spdlog::info("hk_NVSDK_NGX_D3D12_CreateFeature 0x{0:x}", (INT64)result);
     if ((InFeatureID == NVSDK_NGX_Feature_SuperSampling || InFeatureID == NVSDK_NGX_Feature_RayReconstruction)) {
-        if (vr->vrDLSSHandle[0] == NULL)
-            vr->vrDLSSHandle[0] = *OutHandle;
-        else
-            vr->vrDLSSHandle[1] = *OutHandle;
+        vr->vrDLSSHandleMap[*OutHandle] = InFeatureID;
     }
     return result;
 }
@@ -48,19 +45,15 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_ReleaseFeature(NVSDK_NGX_Handle* InHandle) {
     auto result = NVSDK_NGX_D3D12_ReleaseFeature_Hook.call<NVSDK_NGX_Result>(InHandle);
     spdlog::info("hk_NVSDK_NGX_D3D12_ReleaseFeature 0x{0:x}", (INT64)result);
     const auto& vr = VR::get();
-    if (vr->vrDLSSHandle[0] == InHandle) {
-        vr->vrDLSSHandle[0] = NULL;
-    }
-    if (vr->vrDLSSHandle[1] == InHandle) {
-        vr->vrDLSSHandle[1] = NULL;
-    }
+    if (vr->vrDLSSHandleMap.contains(InHandle))
+        vr->vrDLSSHandleMap.erase(InHandle);
     return result;
 }
 
 NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
     ID3D12GraphicsCommandList* InCmdList, const NVSDK_NGX_Handle* InFeatureHandle, NVSDK_NGX_Parameter* InParameters, void* InCallback) {
     const auto& vr = VR::get();
-    if (InFeatureHandle == vr->vrDLSSHandle[0] || InFeatureHandle == vr->vrDLSSHandle[1]) {
+    if (vr->vrDLSSHandleMap.contains((NVSDK_NGX_Handle*)InFeatureHandle)) {
         ID3D12Resource* color;
         ID3D12Resource* depth;
         ID3D12Resource* motionVectors;
@@ -112,69 +105,6 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         }
     }
     auto result = NVSDK_NGX_D3D12_EvaluateFeature_Hook.call<NVSDK_NGX_Result>(InCmdList, InFeatureHandle, InParameters, InCallback);
-    return result;
-}
-
-
-xess_result_t hk_xessD3D12CreateContext(ID3D12Device* pDevice, xess_context_handle_t* phContext) {
-    //spdlog::info("hk_xessD3D12CreateContext xess_context_handle: {}", (int)*phContext);
-    auto result = xessD3D12CreateContext_Hook.call<xess_result_t>(pDevice, phContext);
-    //spdlog::info("hk_xessD3D12CreateContext 0x{0:x}", (INT64)result);
-    const auto& vr = VR::get();
-    if (vr->vrXessContexts[0] == NULL)
-        vr->vrXessContexts[0] = *phContext;
-    else
-        vr->vrXessContexts[1] = *phContext;
-
-    return result;
-}
-
-xess_result_t hk_xessD3D12Init(xess_context_handle_t hContext, const xess_d3d12_init_params_t* pInitParams) {
-    //spdlog::info("hk_xessD3D12Init xess_context_handle: {}", (int)hContext);
-    auto result = xessD3D12Init_Hook.call<xess_result_t>(hContext, pInitParams);
-    //spdlog::info("hk_xessD3D12Init 0x{0:x}", (INT64)result);
-    const auto& vr = VR::get();
-    if (pInitParams && (hContext == vr->vrXessContexts[0] || hContext == vr->vrXessContexts[1])) {
-        bool isDepthInverted = (pInitParams->initFlags & XESS_INIT_FLAG_INVERTED_DEPTH) == XESS_INIT_FLAG_INVERTED_DEPTH;
-        bool isNDCVelocity = (pInitParams->initFlags & XESS_INIT_FLAG_USE_NDC_VELOCITY) == XESS_INIT_FLAG_USE_NDC_VELOCITY;
-    }
-    return result;
-}
-
-xess_result_t hk_xessDestroyContext(xess_context_handle_t* phContext) {
-    //spdlog::info("hk_xessDestroyContext Starts");
-    auto result = xessDestroyContext_Hook.call<xess_result_t>(phContext);
-    //spdlog::info("hk_xessDestroyContext 0x{0:x}", (INT64)result);
-    const auto& vr = VR::get();
-    if (phContext && vr->vrXessContexts[0] == *phContext) {
-        vr->vrXessContexts[0] = NULL;
-    }
-    if (phContext && vr->vrXessContexts[1] == *phContext) {
-        vr->vrXessContexts[1] = NULL;
-    }
-    return result;
-}
-
-xess_result_t hk_xessD3D12Execute(
-    xess_context_handle_t hContext, ID3D12GraphicsCommandList* pCommandList, const xess_d3d12_execute_params_t* pExecParams) {
-    const auto& vr = VR::get();
-    if (pExecParams && (hContext == vr->vrXessContexts[0] || hContext == vr->vrXessContexts[1])) {
-        ID3D12Resource* color = pExecParams->pColorTexture;
-        ID3D12Resource* depth = pExecParams->pDepthTexture;
-        ID3D12Resource* motionVectors = pExecParams->pVelocityTexture;
-        ID3D12Resource* output = pExecParams->pOutputTexture;
-        vr->rawDepthTex = depth;
-        vr->rawMotionVectorsTex = motionVectors;
-        EyeIndex nEye = (vr->get_render_frame_count() % 2 == 0) ? EyeLeft : EyeRight;
-        if (vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture) {
-            TextureDesc src;
-            src.pTexture = depth;
-            vr->d3d12Renderer->Copy(pCommandList, vr->depthDesc[nEye], src);
-            src.pTexture = motionVectors;
-            vr->d3d12Renderer->Copy(pCommandList, vr->motionVectorsDesc[nEye], src);
-        }
-    }
-    auto result = xessD3D12Execute_Hook.call<xess_result_t>(hContext, pCommandList, pExecParams);
     return result;
 }
 
