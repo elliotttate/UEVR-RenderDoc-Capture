@@ -28,6 +28,9 @@ set CompileShadersOutput=%StrTrim:##=%
 rem The compiling part.
 call :CompileShader alpha_luminance_sprite_ps ps SpritePixelShader
 call :CompileShader alpha_luminance_sprite_ps vs SpriteVertexShader
+rem AFW compute shaders (were previously compiled by hand, so .fx edits silently never took effect).
+call :CompileShader ue_velocity_combine_cs cs VelocityCombineCS
+call :CompileShader afw_debug_visualize_cs cs DebugVisualizeCS
 
 if %error% == 0 (
     echo Shaders compiled ok

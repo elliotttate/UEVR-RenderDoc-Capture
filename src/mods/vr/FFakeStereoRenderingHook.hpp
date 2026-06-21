@@ -380,6 +380,18 @@ public:
     static void begin_render_viewfamily_real(void* render_module, sdk::FCanvas* canvas, sdk::FSceneViewFamily* view_family);
     static void begin_render_viewfamily(ISceneViewExtension* extension, sdk::FSceneViewFamily& view_family);
     static void pre_render_viewfamily_renderthread(ISceneViewExtension* extension, sdk::FRHICommandListBase* cmd_list, sdk::FSceneViewFamily& view_family);
+    // ISceneViewExtension::PostRenderBasePassDeferred_RenderThread (UE5.6 vtable index 10). Fires after the GBuffer
+    // (incl. SceneVelocity) is written, with the bound render targets + the scene-textures uniform buffer — so we can
+    // grab the REAL SceneVelocity FRDGTexture explicitly (by RDG Name, which survives Shipping) instead of guessing.
+    static void post_render_basepass_deferred_renderthread(ISceneViewExtension* extension, void* graph_builder,
+        void* scene_view, void* render_targets, void* scene_textures_ubo);
+    // ISceneViewExtension::PrePostProcessPass_RenderThread. Fires after all geometry (incl. the velocity pass), so its
+    // FPostProcessingInputs scene-textures uniform buffer holds the REAL SceneVelocity FRDGTexture (a dummy earlier).
+    static void pre_post_process_pass_renderthread(ISceneViewExtension* extension, void* graph_builder,
+        void* scene_view, void* post_process_inputs);
+    // The engine's real SceneVelocity native resource (ID3D12Resource* as void*), resolved from the stable pooled
+    // FRHITexture captured during scene-graph Execute via the ISceneViewExtension hooks. nullptr until captured.
+    static void* get_afw_sve_velocity_resource();
 
 private:
     bool hook();

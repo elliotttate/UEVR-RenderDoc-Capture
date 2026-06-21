@@ -2426,6 +2426,70 @@ void FFakeStereoRenderingHook::game_viewport_client_draw_hook(sdk::UGameViewport
 static std::array<uintptr_t, 50> g_view_extension_vtable{};
 struct SceneViewExtensionAnalyzer;
 
+// Defined further down (near the SVE render-thread hooks). Validates a candidate FRDGResource::Name (+8) string;
+// used by the analyzer to recognize PostRenderBasePassDeferred by its FRenderTargetBindingSlots argument.
+static bool afw_sve_plausible_name(const wchar_t* p);
+
+// Scans a candidate FRenderTargetBindingSlots (the R9/4th arg of PostRenderBasePassDeferred_RenderThread): counts how
+// many of its leading words are FRDGTexture pointers carrying a readable RDG Name, and whether any is a recognizable
+// scene texture. Returns the hit count; sets out_has_scene_name when a Scene/GBuffer/Velocity/Color name is present.
+static int afw_sve_count_binding_slot_textures(const void* render_targets, bool& out_has_scene_name) {
+    out_has_scene_name = false;
+    if (render_targets == nullptr || IsBadReadPtr((void*)render_targets, 0x110)) {
+        return 0;
+    }
+    const auto* words = reinterpret_cast<const uintptr_t*>(render_targets);
+    int hits = 0;
+    for (int i = 0; i < 33; ++i) {
+        const uintptr_t cand = words[i];
+        if (cand < 0x10000 || IsBadReadPtr((void*)cand, 0x20)) {
+            continue;
+        }
+        const auto name_ptr = *reinterpret_cast<const wchar_t* const*>(cand + 8);
+        if (afw_sve_plausible_name(name_ptr)) {
+            ++hits;
+            const auto n = utility::narrow(name_ptr);
+            if (n.find("Scene") != std::string::npos || n.find("GBuffer") != std::string::npos ||
+                n.find("Velocity") != std::string::npos || n.find("Color") != std::string::npos) {
+                out_has_scene_name = true;
+            }
+        }
+    }
+    return hits;
+}
+
+// The real SceneVelocity FRDGTexture, captured at PrePostProcessPass each frame (its ResourceRHI is still null at
+// build time). Phase 3 reads its ResourceRHI during scene-graph Execute (where it IS assigned) and caches the stable
+// pooled FRHITexture pointer in g_afw_sve_velocity_rhi; the AFW combine resolves that to the ID3D12Resource.
+static inline void* g_afw_sve_velocity_frdg = nullptr;
+static inline void* g_afw_sve_velocity_rhi = nullptr;      // FRHITexture* (valid only during Execute)
+static inline void* g_afw_sve_velocity_resource = nullptr; // ID3D12Resource* resolved DURING Execute (never at present)
+
+// Given a SceneTextures FRDGUniformBuffer pointer, follow it to its FSceneTextureUniformParameters Contents and return
+// the FRDGTexture* named "SceneVelocity" if present (real, not a dummy). FRDGUniformBuffer = base FRDGResource(24) +
+// FRDGParameterStruct{ Contents@+0 } => the Contents pointer is at ubo+24 (confirmed live: ubo word 3).
+static void* afw_sve_find_velocity_frdg_in_ubo(void* ubo) {
+    if (ubo == nullptr || IsBadReadPtr(ubo, 0x40)) {
+        return nullptr;
+    }
+    const uintptr_t contents = *reinterpret_cast<const uintptr_t*>(reinterpret_cast<uintptr_t>(ubo) + 24);
+    if (contents < 0x10000 || IsBadReadPtr((void*)contents, 0x800)) {
+        return nullptr;
+    }
+    const auto* cwords = reinterpret_cast<const uintptr_t*>(contents);
+    for (int i = 0; i < 320; ++i) {
+        const uintptr_t cand = cwords[i];
+        if (cand < 0x10000 || IsBadReadPtr((void*)cand, 0x20)) {
+            continue;
+        }
+        const auto name_ptr = *reinterpret_cast<const wchar_t* const*>(cand + 8);
+        if (afw_sve_plausible_name(name_ptr) && utility::narrow(name_ptr) == "SceneVelocity") {
+            return reinterpret_cast<void*>(cand);
+        }
+    }
+    return nullptr;
+}
+
 // Analyzes all of the virtual functions for ISceneViewExtension
 // We create the ISceneViewExtension ourselves and overwrite all of the virtual functions
 // The class will count how many times each virtual is getting called
@@ -2466,6 +2530,8 @@ struct SceneViewExtensionAnalyzer {
     static inline uint32_t is_active_this_frame_index{0};
     static inline uint32_t begin_render_viewfamily_index{0};
     static inline uint32_t pre_render_viewfamily_renderthread_index{0};
+    static inline uint32_t post_render_basepass_deferred_index{0};
+    static inline uint32_t pre_post_process_pass_index{0};
     static inline uint32_t frame_count_offset{0};
 
     template<int N>
@@ -2532,6 +2598,29 @@ struct SceneViewExtensionAnalyzer {
         }
 
         std::scoped_lock _{dummy_mutex};
+
+        // Identify PostRenderBasePassDeferred_RenderThread by SIGNATURE rather than a fragile vtable-offset guess
+        // (this game's layout differs from the stock header). Its 4th arg (a4 == R9) is an FRenderTargetBindingSlots
+        // full of named FRDGTextures (SceneColor/GBufferA/.../SceneVelocity). When we see that, lock the index in.
+        if (post_render_basepass_deferred_index == 0) {
+            bool has_scene_name = false;
+            const int rt_hits = afw_sve_count_binding_slot_textures((const void*)a4, has_scene_name);
+            if (rt_hits >= 3 && has_scene_name) {
+                post_render_basepass_deferred_index = N;
+                SPDLOG_INFO("[AFW][SVE] Identified PostRenderBasePassDeferred at index {} by signature ({} named RTs)", N, rt_hits);
+            }
+        }
+
+        // Identify PrePostProcessPass_RenderThread similarly: its 4th arg (a4 == R9) is an FPostProcessingInputs whose
+        // first member (a4[0]) is the SceneTextures uniform buffer â€” and by this point (after all geometry) it holds
+        // the REAL SceneVelocity (a dummy at PostRenderBasePassDeferred). When that resolves, lock the index in.
+        if (pre_post_process_pass_index == 0 && a4 != 0 && !IsBadReadPtr((void*)a4, sizeof(void*))) {
+            void* ubo = *reinterpret_cast<void* const*>(a4);
+            if (afw_sve_find_velocity_frdg_in_ubo(ubo) != nullptr) {
+                pre_post_process_pass_index = N;
+                SPDLOG_INFO("[AFW][SVE] Identified PrePostProcessPass at index {} by signature (real SceneVelocity in ubo)", N);
+            }
+        }
 
         if (functions.contains(N)) {
             auto& func = functions[N];
@@ -2654,6 +2743,30 @@ struct SceneViewExtensionAnalyzer {
         // PreRenderViewFamily_RenderThread
         g_view_extension_vtable[pre_render_viewfamily_renderthread_index] = (uintptr_t)&FFakeStereoRenderingHook::pre_render_viewfamily_renderthread;
 
+        // PostRenderBasePassDeferred_RenderThread: install at the index the analyzer identified BY SIGNATURE (its a4 is
+        // the FRenderTargetBindingSlots). This game's vtable doesn't match the stock header order (begin=5/pre=8 here,
+        // delta 3 not 2), so signature detection is the robust path. Gives us the bound GBuffer render targets =>
+        // the real SceneVelocity, no heuristic.
+        if (post_render_basepass_deferred_index != 0 &&
+            post_render_basepass_deferred_index < g_view_extension_vtable.size()) {
+            g_view_extension_vtable[post_render_basepass_deferred_index] =
+                (uintptr_t)&FFakeStereoRenderingHook::post_render_basepass_deferred_renderthread;
+            SPDLOG_INFO("[AFW][SVE] Installed PostRenderBasePassDeferred hook at index {}", post_render_basepass_deferred_index);
+        } else {
+            SPDLOG_WARN("[AFW][SVE] PostRenderBasePassDeferred index not identified by signature; skipping hook (begin={}, pre={})",
+                begin_render_viewfamily_index, pre_render_viewfamily_renderthread_index);
+        }
+
+        // PrePostProcessPass_RenderThread â€” where the REAL SceneVelocity FRDGTexture is reachable. Install at the
+        // signature-identified index (its FPostProcessingInputs ubo holds a real SceneVelocity).
+        if (pre_post_process_pass_index != 0 && pre_post_process_pass_index < g_view_extension_vtable.size()) {
+            g_view_extension_vtable[pre_post_process_pass_index] =
+                (uintptr_t)&FFakeStereoRenderingHook::pre_post_process_pass_renderthread;
+            SPDLOG_INFO("[AFW][SVE] Installed PrePostProcessPass hook at index {}", pre_post_process_pass_index);
+        } else {
+            SPDLOG_WARN("[AFW][SVE] PrePostProcessPass index not identified by signature; skipping hook");
+        }
+
         SPDLOG_INFO("Done setting up BeginRenderViewFamily hook!");
     }
 
@@ -2712,6 +2825,30 @@ struct SceneViewExtensionAnalyzer {
 
         if (N != correct_execute_index) {
             return call_orig();
+        }
+
+        // PHASE 3: this runs during the scene render-graph Execute, where the captured SceneVelocity FRDGTexture is
+        // still alive AND its ResourceRHI is now assigned (build callbacks see ResourceRHI=0). Cache the stable pooled
+        // FRHITexture pointer; the AFW combine (D3D12Component) resolves it to the real velocity ID3D12Resource. The
+        // FRDGTexture changes each frame but the underlying pooled RHI is stable, so this needs to land only once.
+        {
+            void* frdg = g_afw_sve_velocity_frdg;
+            if (frdg != nullptr && !IsBadReadPtr(frdg, 0x100)) {
+                // The engine ALTERNATES the SceneVelocity format per frame: PF_A16B16G16R16 (==19, encoded RGBA16_UNORM,
+                // what DLSS's VelocityCombine consumes) vs a plain R16G16_FLOAT. Only adopt the ENCODED one so the combine
+                // always runs its encoded-decode path on a consistent input (on the off-frames it reuses this pooled RHI,
+                // which is stale by 1 frame â€” acceptable). Format is at FRDGTextureDesc Extent(+132)+15 = +147.
+                const uint8_t fmt = *reinterpret_cast<const uint8_t*>(reinterpret_cast<uintptr_t>(frdg) + 147);
+                if (fmt == 19) {
+                    void* rrhi = *reinterpret_cast<void* const*>(reinterpret_cast<uintptr_t>(frdg) + 16);
+                    // DISABLED: resolving here (correct_execute) crashed â€” by this point in the frame g_afw_sve_velocity_frdg
+                    // is frequently STALE (pipelined: a later frame overwrote it, or the FRDGTexture is already freed so
+                    // ResourceRHI reads 0xffff...), and even when it resolves the transient CONTENT is already aliased
+                    // (post-processing has consumed the velocity, RDG reused its memory -> dump was dense garbage). The
+                    // capture MUST move to the velocity's live window (the velocity pass), not this late execute point.
+                    (void)rrhi;
+                }
+            }
         }
 
         // set the vtable back
@@ -3504,6 +3641,145 @@ void FFakeStereoRenderingHook::begin_render_viewfamily(ISceneViewExtension* exte
                 }
             } else {
                 SPDLOG_ERROR("Failed to find BeginRenderingViewFamily real function");
+            }
+        }
+    }
+}
+
+// Reads a candidate FRDGResource::Name (a wide string literal at offset +8). Guards against bad/misinterpreted
+// pointers and rejects non-name memory. Scene textures keep this RDG name even in Shipping builds (unlike the RHI
+// debug name), so it reliably identifies SceneColor/GBufferA/.../SceneVelocity.
+static bool afw_sve_plausible_name(const wchar_t* p) {
+    if (p == nullptr || (uintptr_t)p < 0x10000 || IsBadReadPtr((void*)p, sizeof(wchar_t) * 2)) {
+        return false;
+    }
+    if (p[0] < L'A' || p[0] > L'z') {
+        return false; // RT names start with a letter
+    }
+    for (int i = 1; i < 64; ++i) {
+        if (IsBadReadPtr((void*)(p + i), sizeof(wchar_t))) {
+            return false;
+        }
+        const wchar_t c = p[i];
+        if (c == 0) {
+            return i >= 2; // printable + null-terminated within a sane length
+        }
+        if (c < 0x20 || c > 0x7E) {
+            return false; // non-printable => not a debug name
+        }
+    }
+    return false; // too long without a terminator
+}
+
+void FFakeStereoRenderingHook::post_render_basepass_deferred_renderthread(ISceneViewExtension* extension,
+    void* graph_builder, void* scene_view, void* render_targets, void* scene_textures_ubo) {
+    ZoneScopedN("PostRenderBasePassDeferred_RenderThread");
+
+    // PHASE 1 foothold. Confirm the hook index is right and reveal the SceneVelocity FRDGTexture explicitly.
+    // FRenderTargetBindingSlots (render_targets) is an array of FRenderTargetBinding, each beginning with an
+    // FRDGTexture*. Scan the slot words; for any that look like an FRDGTexture (FRDGResource layout in Shipping:
+    // [0]=vtable, [8]=Name, [16]=ResourceRHI), read the RDG Name and ResourceRHI. Seeing "SceneColor"/"GBufferA"/
+    // "SceneVelocity" confirms index + offsets and hands us the velocity texture's RHI resource for the next phase.
+    static bool s_dumped = false;
+    if (!s_dumped && render_targets != nullptr && !IsBadReadPtr(render_targets, 0x110)) {
+        s_dumped = true;
+        SPDLOG_INFO("[AFW][SVE] PostRenderBasePassDeferred fired: gb={:x} view={:x} rts={:x} ubo={:x}",
+            (uintptr_t)graph_builder, (uintptr_t)scene_view, (uintptr_t)render_targets, (uintptr_t)scene_textures_ubo);
+        const auto* words = reinterpret_cast<const uintptr_t*>(render_targets);
+        for (int i = 0; i < 33; ++i) {
+            const uintptr_t cand = words[i];
+            if (cand < 0x10000 || IsBadReadPtr((void*)cand, 0x20)) {
+                continue;
+            }
+            const auto name_ptr = *reinterpret_cast<const wchar_t* const*>(cand + 8);
+            if (afw_sve_plausible_name(name_ptr)) {
+                const auto resource_rhi = *reinterpret_cast<void* const*>(cand + 16);
+                SPDLOG_INFO("[AFW][SVE] RT word[{}] FRDGTexture={:x} Name='{}' ResourceRHI={:x}",
+                    i, cand, utility::narrow(name_ptr), (uintptr_t)resource_rhi);
+            }
+        }
+
+        // PHASE 2 (diagnostic): SceneVelocity isn't in the base-pass binding slots, so find it via the 4th arg â€” the
+        // SceneTextures uniform buffer. FRDGUniformBuffer holds an FRDGParameterStruct whose Contents pointer is the
+        // FSceneTextureUniformParameters (full of FRDGTexture*). Probe the ubo's leading words for the Contents pointer
+        // (the one whose memory contains named scene-texture FRDGTextures) and DUMP every named texture we find, so we
+        // can see whether SceneVelocity is present here (and at which struct slot) or whether we must look elsewhere.
+        if (scene_textures_ubo != nullptr && !IsBadReadPtr(scene_textures_ubo, 0x80)) {
+            const auto* ubo_words = reinterpret_cast<const uintptr_t*>(scene_textures_ubo);
+            for (int w = 0; w < 24; ++w) {
+                const uintptr_t contents = ubo_words[w];
+                if (contents < 0x10000 || IsBadReadPtr((void*)contents, 0x800)) {
+                    continue;
+                }
+                const auto* cwords = reinterpret_cast<const uintptr_t*>(contents);
+                int hits = 0;
+                std::string names;
+                for (int i = 0; i < 320; ++i) {
+                    const uintptr_t cand = cwords[i];
+                    if (cand < 0x10000 || IsBadReadPtr((void*)cand, 0x20)) {
+                        continue;
+                    }
+                    const auto name_ptr = *reinterpret_cast<const wchar_t* const*>(cand + 8);
+                    if (afw_sve_plausible_name(name_ptr)) {
+                        names += "[" + std::to_string(i) + "]" + utility::narrow(name_ptr) + " ";
+                        if (++hits >= 48) {
+                            break;
+                        }
+                    }
+                }
+                if (hits >= 3) {
+                    SPDLOG_INFO("[AFW][SVE] PHASE2 ubo[w{}] Contents={:x} named-FRDGTextures({}): {}", w, contents, hits, names);
+                }
+            }
+        }
+    }
+}
+
+void* FFakeStereoRenderingHook::get_afw_sve_velocity_resource() {
+    // Already resolved during Execute (see the capture point). NEVER resolve here â€” at present the FRHITexture is freed.
+    return g_afw_sve_velocity_resource;
+}
+
+void FFakeStereoRenderingHook::pre_post_process_pass_renderthread(ISceneViewExtension* extension,
+    void* graph_builder, void* scene_view, void* post_process_inputs) {
+    ZoneScopedN("PrePostProcessPass_RenderThread");
+
+    // FPostProcessingInputs::SceneTextures is the first member (a TRDGUniformBufferRef => FRDGUniformBuffer*). Follow it
+    // to the real SceneVelocity FRDGTexture and stash it for the AFW provider path. (ResourceRHI is still null here â€”
+    // RDG allocates it during Execute; Phase 3 resolves the actual ID3D12Resource afterward via extraction.)
+    if (post_process_inputs == nullptr || IsBadReadPtr(post_process_inputs, sizeof(void*))) {
+        return;
+    }
+    void* ubo = *reinterpret_cast<void* const*>(post_process_inputs);
+    void* velocity_frdg = afw_sve_find_velocity_frdg_in_ubo(ubo);
+    if (velocity_frdg != nullptr) {
+        g_afw_sve_velocity_frdg = velocity_frdg;
+        static bool once = true;
+        if (once) {
+            once = false;
+            const auto resource_rhi = *reinterpret_cast<void* const*>(reinterpret_cast<uintptr_t>(velocity_frdg) + 16);
+            SPDLOG_INFO("[AFW][SVE] PHASE2 captured REAL SceneVelocity FRDGTexture={:x} ResourceRHI={:x}",
+                reinterpret_cast<uintptr_t>(velocity_frdg), reinterpret_cast<uintptr_t>(resource_rhi));
+
+            // PHASE 3 diagnostic: locate the FRDGTextureDesc (Extent + Format) inside the FRDGTexture so we can pin the
+            // exact D3D12 resource by desc (build-time data; avoids the RHI-timing problem). Dump the header + every
+            // plausible Extent int32-pair (a render resolution) with its offset.
+            if (!IsBadReadPtr(velocity_frdg, 0x180)) {
+                // FRHITextureDesc tail layout: Extent(FIntPoint,8) Depth(u16) ArraySize(u16) NumMips(u8) NumSamples(u8)
+                // Dimension(u8) Format(u8) UAVFormat(u8). Find the Extent (a plausible resolution pair) and read the
+                // Format at Extent+15 â€” the authoritative engine velocity format we'll use to pin the D3D12 resource.
+                const auto* d = reinterpret_cast<const uint8_t*>(velocity_frdg);
+                const auto* w32 = reinterpret_cast<const int32_t*>(velocity_frdg);
+                for (int i = 0; i < 84; ++i) {
+                    const int32_t a = w32[i], c = w32[i + 1];
+                    if (a >= 128 && a <= 8192 && c >= 128 && c <= 8192) {
+                        const int e = i * 4;
+                        const uint16_t depth = *reinterpret_cast<const uint16_t*>(d + e + 8);
+                        const uint16_t arr = *reinterpret_cast<const uint16_t*>(d + e + 10);
+                        SPDLOG_INFO("[AFW][SVE] velocity extent[off{}]={}x{} depth={} arr={} mips={} samples={} dim={} FORMAT={} uav={}",
+                            e, a, c, depth, arr, (int)d[e + 12], (int)d[e + 13], (int)d[e + 14], (int)d[e + 15], (int)d[e + 16]);
+                    }
+                }
             }
         }
     }
@@ -4928,7 +5204,7 @@ __forceinline void FFakeStereoRenderingHook::calculate_stereo_view_offset(
                 glm::radians(-(float)rot_d->yaw),
                 glm::radians((float)rot_d->pitch),
                 glm::radians(-(float)rot_d->roll));
-        // Æ¬¶Î£ºÔÚ calculate_stereo_view_offset ·½·¨Ä©Î²µ÷ÓÃ»ò²åÈëÒÔ»ñÈ¡×îÖÕ view ¾ØÕó
+        // Æ¬ï¿½Î£ï¿½ï¿½ï¿½ calculate_stereo_view_offset ï¿½ï¿½ï¿½ï¿½Ä©Î²ï¿½ï¿½ï¿½Ã»ï¿½ï¿½ï¿½ï¿½ï¿½Ô»ï¿½È¡ï¿½ï¿½ï¿½ï¿½ view ï¿½ï¿½ï¿½ï¿½
         if (!has_double_precision) {
             glm::vec3 cam_pos = (*view_location) / vr->get_world_to_meters();
             glm::vec3 cam_pos_other = view_location_other / vr->get_world_to_meters();
@@ -4996,7 +5272,22 @@ __forceinline Matrix4x4f* FFakeStereoRenderingHook::calculate_stereo_projection_
     // Only call PostInitProperties if ghosting fix enabled or native stereo is being used.
     // Also, if we don't have a hook on GetDesiredNumberOfViews, we need to call PostInitProperties
     //if (!vr->is_using_afr() || vr->is_ghosting_fix_enabled() || !g_hook->m_get_desired_number_of_views_hook) {
-    if (!vr->should_skip_post_init_properties()) {
+    // Under embedded RenderDoc, do NOT lazily install this mid-hook from the game thread. safetyhook
+    // freezes ALL other threads (trap_threads) to patch, and with RenderDoc's serialization threads (and
+    // any global hooking tools like Windhawk) resident, a frozen thread holds the heap/loader lock the
+    // patch's memcpy needs -> the game thread deadlocks forever in safetyhook::create_mid -> the whole
+    // render loop freezes mid-frame (xrBeginFrame done, xrEndFrame never reached, OpenXR wedges) and
+    // VR/AFW never come up under capture. This was the root cause of the "wedge" diagnosed via a thread
+    // stack dump. Skipping the post-hook loses only the localplayer view-count post-fix, which is
+    // acceptable for a capture session. Gated on UEVR_RENDERDOC_BOOTSTRAP (launcher-set) so normal runs
+    // are completely unaffected. (UEVRJ doesn't need this because its capture environment doesn't hold
+    // the same locks at freeze time; ours does.)
+    static const bool s_skip_lazy_midhook_under_renderdoc = []() {
+        char v[8]{};
+        return GetEnvironmentVariableA("UEVR_RENDERDOC_BOOTSTRAP", v, sizeof(v)) > 0 && v[0] != '\0' && v[0] != '0';
+    }();
+
+    if (!vr->should_skip_post_init_properties() && !s_skip_lazy_midhook_under_renderdoc) {
         if (!g_hook->m_fixed_localplayer_view_count) {
             if (!g_hook->m_calculate_stereo_projection_matrix_post_hook) {
                 const auto return_address = (uintptr_t)_ReturnAddress();

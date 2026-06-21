@@ -59,7 +59,18 @@ endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# Apply the AFW/embedded-RenderDoc fixes to the builder's own UESDK checkout at
+# configure time, before UESDK is compiled. Idempotent: no-ops if already
+# applied. Must run before add_subdirectory.
+include(cmake/ApplyUESDKPatch.cmake)
+
 add_subdirectory(dependencies/submodules/UESDK)
+
+# Embedded RenderDoc capture: defines uevr_attach_full_renderdoc(), which copies
+# (or, if UEVR_RENDERDOC_ALWAYS_BUILD=ON, rebuilds) renderdoc.dll beside the
+# backend and builds the suspended launcher + smoke validator. Non-fatal if the
+# RenderDoc source/runtime isn't present.
+include(cmake/RenderDocFull.cmake)
 
 include(FetchContent)
 
@@ -885,6 +896,9 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/d3d12/TextureContext.cpp"
 	"src/mods/vr/runtimes/OpenVR.cpp"
 	"src/mods/vr/runtimes/OpenXR.cpp"
+	"src/render/RenderDocCaptureControl.cpp"
+	"src/render/RenderDocCaptureService.cpp"
+	"src/render/RenderDocDxgiProofHooks.cpp"
 	"src/uevr-imgui/imgui_impl_dx11.cpp"
 	"src/uevr-imgui/imgui_impl_dx12.cpp"
 	"src/uevr-imgui/imgui_impl_win32.cpp"
@@ -933,6 +947,9 @@ list(APPEND uevr_SOURCES
 	"src/mods/vr/runtimes/VRRuntime.hpp"
 	"src/mods/vr/shaders/ps.hpp"
 	"src/mods/vr/shaders/vs.hpp"
+	"src/render/RenderDocCaptureControl.hpp"
+	"src/render/RenderDocCaptureService.hpp"
+	"src/render/RenderDocDxgiProofHooks.hpp"
 	"src/uevr-imgui/font_robotomedium.hpp"
 	"src/uevr-imgui/uevr_imconfig.hpp"
 	"src/utility/ImGui.hpp"
@@ -971,6 +988,7 @@ target_include_directories(uevr PUBLIC
 	"include/"
 	"plugins/afw_frame_resources/include"
 	"${OPENXR_SOURCE_DIR}/src"
+	"dependencies/vendor/renderdoc"
 )
 
 target_link_libraries(uevr PUBLIC
@@ -1032,6 +1050,9 @@ add_custom_command(
     TARGET uevr POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:openvr> $<TARGET_FILE_DIR:uevr>)
 
+# Build the RenderDoc launcher + smoke tools and stage renderdoc.dll beside
+# UEVRBackend.dll. No-op if RenderDoc isn't available on this machine.
+uevr_attach_full_renderdoc(uevr)
+
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
-

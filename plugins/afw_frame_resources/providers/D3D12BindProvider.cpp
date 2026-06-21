@@ -76,6 +76,11 @@ ResourceCandidate g_velocity_candidate;
 ResourceCandidate g_depth_candidate;
 ResourceCandidate g_sticky_velocity_candidate;
 ResourceCandidate g_scene_velocity_candidate;
+// Depth has no per-frame guarantee of a bind (AFW alternates eyes; many frames bind only shadow /
+// spectator DSVs), so — like velocity — keep a sticky copy of the best recent depth and serve it on
+// frames where the eye depth DSV isn't (re)bound. Without this the depth entry goes Stale within
+// max_stale_frames and the combine starves (no depth -> no reconstruction -> no motion vectors).
+ResourceCandidate g_sticky_depth_candidate;
 uint64_t g_scene_velocity_area = 0;
 uint32_t g_scene_velocity_width = 0;
 uint32_t g_scene_velocity_height = 0;
@@ -358,6 +363,17 @@ int velocity_intrinsic_score(const D3D12ViewInfo& v) {
     int s = 0;
     if (is_canonical_velocity_format(v.format)) s += 2;
     if (v.width >= 256 && v.height >= 256) s += 1;
+    // Opt-in (UEVR_AFW_PREFER_ENCODED_VELOCITY): prefer the ENCODED velocity-depth buffer
+    // (PF_A16B16G16R16 == R16G16B16A16_UNORM) — the exact buffer NVIDIA's VelocityCombine.usf reads
+    // (DecodeVelocityFromTexture + the `EncodedVelocity.x > 0` written flag). On this title the default
+    // RG16_FLOAT pick is an already-decoded / banded variant whose "written" pixels are scattered, so
+    // porting DLSS's exact selection onto it reintroduces noise; the encoded RGBA16_UNORM buffer carries
+    // the coherent written flag DLSS relies on. Gated so it cannot mislabel other titles' RGBA16 colour.
+    static const bool s_prefer_encoded = []{
+        const char* e = std::getenv("UEVR_AFW_PREFER_ENCODED_VELOCITY");
+        return e != nullptr && *e != '\0' && std::atoi(e) != 0;
+    }();
+    if (s_prefer_encoded && v.format == DXGI_FORMAT_R16G16B16A16_UNORM) s += 3;
     return s;
 }
 
@@ -385,7 +401,10 @@ bool env_bool(const char* name, bool default_value) {
 }
 
 bool velocity_snapshot_enabled() {
-    return env_bool("UEVR_FRAME_RESOURCES_SNAPSHOT_VELOCITY", false);
+    // DEFAULT ON: the live-window snapshot of the first-per-frame velocity is how we deliver the real encoded
+    // SceneVelocity to the combine (the live RDG resource is transient/recycled and the heuristic picks the wrong
+    // dense RGBA16). Set UEVR_FRAME_RESOURCES_SNAPSHOT_VELOCITY=0 to fall back to serving the raw live candidate.
+    return env_bool("UEVR_FRAME_RESOURCES_SNAPSHOT_VELOCITY", true);
 }
 
 void release_velocity_snapshot_locked() {
@@ -521,6 +540,25 @@ bool is_better_velocity_candidate(const D3D12ViewInfo& info, int score, const Re
     // Same score and same dimensions: keep existing latest-bind behavior for genuinely equivalent
     // targets.
     return true;
+}
+
+// Sticky-depth comparison: like velocity, prefer the higher intrinsic score, then the LARGER buffer.
+// is_better_depth_candidate is score-then-latest-wins, which lets an incidental equal-score low-res DSV
+// (e.g. the engine's 1004x628 spectator depth) displace the full-res eye depth that the combine needs.
+// The area tiebreak keeps the eye-resolution depth pinned as the sticky.
+bool is_better_sticky_depth(const D3D12ViewInfo& info, int score, const ResourceCandidate& current) {
+    if (!current.present || current.info.resource == nullptr) {
+        return true;
+    }
+    if (score != current.score) {
+        return score > current.score;
+    }
+    const uint64_t area = resource_area(info);
+    const uint64_t current_area = resource_area(current.info);
+    if (area != current_area) {
+        return area > current_area;
+    }
+    return true; // equal score and size: latest equivalent DSV wins
 }
 
 void reset_scene_velocity_high_water_locked() {
@@ -720,7 +758,12 @@ void consider_barrier_resource(ID3D12GraphicsCommandList* command_list,
         const bool leaving_writable_velocity_state =
             state_has(before, D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS) &&
             !state_has(after, D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        if (leaving_writable_velocity_state && resource_area(info) >= g_scene_velocity_area) {
+        // Snapshot only the FIRST velocity-shaped target that leaves the writable state each frame. The engine writes
+        // the real SceneVelocity in the velocity pass (early); later RGBA16 post-process buffers (same shape) leave RT
+        // afterward and would otherwise OVERWRITE the snapshot with the wrong, dense buffer. Capturing the first one — in
+        // its live window, content still valid, state known (`after`) — gives us the authoritative encoded SceneVelocity.
+        if (leaving_writable_velocity_state && resource_area(info) >= g_scene_velocity_area &&
+            g_velocity_snapshot.frame != current_frame) {
             snapshot_velocity_resource_locked(command_list, info, after, current_frame, source);
         }
     }
@@ -1088,6 +1131,7 @@ void D3D12BindProvider::uninstall() {
         release_candidate_locked(g_velocity_candidate);
         release_candidate_locked(g_depth_candidate);
         release_candidate_locked(g_sticky_velocity_candidate);
+        release_candidate_locked(g_sticky_depth_candidate);
         reset_scene_velocity_high_water_locked();
         release_velocity_snapshot_locked();
     }
@@ -1111,6 +1155,7 @@ void D3D12BindProvider::flush(FrameResourceTracker& tracker) {
     ResourceCandidate cand;
     ResourceCandidate sticky_cand;
     ResourceCandidate scene_cand;
+    ResourceCandidate sticky_depth_cand;
     const uint32_t current_frame = FrameResourceTracker::get().current_frame();
     {
         std::scoped_lock lock(g_state_mutex);
@@ -1140,36 +1185,79 @@ void D3D12BindProvider::flush(FrameResourceTracker& tracker) {
         if (scene_velocity_candidate_available_locked(current_frame)) {
             scene_cand = copy_candidate_locked(g_scene_velocity_candidate);
         }
+
+        // Maintain the sticky depth (mirror of the velocity sticky above): pin the best/largest recent
+        // depth so a frame without an eye-depth DSV bind still serves a Valid depth to the combine.
+        if (depth_cand.present && depth_cand.info.resource != nullptr &&
+            is_better_sticky_depth(depth_cand.info, depth_cand.score, g_sticky_depth_candidate)) {
+            replace_candidate_locked(g_sticky_depth_candidate, depth_cand.info, depth_cand.score, depth_cand.source);
+            g_sticky_depth_candidate.frame = depth_cand.frame;
+        } else if (g_sticky_depth_candidate.present &&
+                   !is_recent_candidate(current_frame, g_sticky_depth_candidate)) {
+            release_candidate_locked(g_sticky_depth_candidate);
+        }
+        if (is_recent_candidate(current_frame, g_sticky_depth_candidate)) {
+            sticky_depth_cand = copy_candidate_locked(g_sticky_depth_candidate);
+        }
     }
 
     // NOTE(eye/motion): both observations are emitted as FrameResourceEye::Both with default unit
     // motion scale. Per-eye velocity routing and motion_scale population are not implemented yet
     // (the bind provider sees the shared engine targets, not per-eye splits). See plan Phase 4+.
-    if (depth_cand.present && depth_cand.info.resource != nullptr) {
+    // Serve the freshest good depth: prefer this frame's bind, else the recent sticky. Pick the better
+    // of the two (score, then larger area) so the full-res eye depth wins over an incidental low-res DSV.
+    ResourceCandidate served_depth;
+    auto take_best_depth = [&](ResourceCandidate& option) {
+        if (!option.present || option.info.resource == nullptr) {
+            return;
+        }
+        if (served_depth.present && served_depth.info.resource != nullptr &&
+            !is_better_sticky_depth(option.info, option.score, served_depth)) {
+            return;
+        }
+        if (served_depth.info.resource != nullptr) {
+            served_depth.info.resource->Release();
+        }
+        served_depth = option;
+        option = {};
+    };
+    take_best_depth(depth_cand);
+    take_best_depth(sticky_depth_cand);
+    if (depth_cand.info.resource != nullptr) depth_cand.info.resource->Release();
+    if (sticky_depth_cand.info.resource != nullptr) sticky_depth_cand.info.resource->Release();
+
+    if (served_depth.present && served_depth.info.resource != nullptr) {
         char key[96];
-        std::snprintf(key, sizeof(key), "depthcand:%p:%ux%u:%u", (void*)depth_cand.info.resource,
-                      depth_cand.info.width, depth_cand.info.height, (unsigned)depth_cand.info.format);
+        std::snprintf(key, sizeof(key), "depthcand:%p:%ux%u:%u", (void*)served_depth.info.resource,
+                      served_depth.info.width, served_depth.info.height, (unsigned)served_depth.info.format);
         if (log_once_key(key)) {
             log_info("d3d12 depth candidate ptr=0x%p %ux%u fmt=%u source=%s score=%d",
-                     (void*)depth_cand.info.resource, depth_cand.info.width, depth_cand.info.height,
-                     (unsigned)depth_cand.info.format, depth_cand.source ? depth_cand.source : "?",
-                     depth_cand.score);
+                     (void*)served_depth.info.resource, served_depth.info.width, served_depth.info.height,
+                     (unsigned)served_depth.info.format, served_depth.source ? served_depth.source : "?",
+                     served_depth.score);
+        }
+        if ((current_frame % 120u) == 0u) {
+            log_info("D3D12Bind: serving depth %ux%u fmt=%u (sticky age %u frames)",
+                     served_depth.info.width, served_depth.info.height, (unsigned)served_depth.info.format,
+                     current_frame >= served_depth.frame ? current_frame - served_depth.frame : 0u);
         }
 
         ObservedFrameResource o;
         o.kind = FrameResourceKind::Depth;
         o.provider = FrameResourceProvider::D3D12Bind;
         o.eye = FrameResourceEye::Both;
-        o.resource = depth_cand.info.resource;
-        o.format = depth_cand.info.format;
-        o.width = depth_cand.info.width;
-        o.height = depth_cand.info.height;
+        o.resource = served_depth.info.resource;
+        o.format = served_depth.info.format;
+        o.width = served_depth.info.width;
+        o.height = served_depth.info.height;
         o.expected_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
-        o.render_frame = depth_cand.frame;
+        // Stamp the served frame as current so a sticky depth (a few frames old, within the sticky
+        // window) reads as Valid instead of Stale — the combine needs a depth EVERY frame to run.
+        o.render_frame = current_frame;
         o.debug_name = "d3d12_depth_dsv";
         tracker.observe_resource(o);
         tracker.bump("d3d12_depth_candidate");
-        depth_cand.info.resource->Release();
+        served_depth.info.resource->Release();
     } else {
         tracker.observe_missing(FrameResourceKind::Depth, FrameResourceProvider::D3D12Bind,
                                 "no depth-stencil view bound this frame");

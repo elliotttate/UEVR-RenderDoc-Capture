@@ -24,6 +24,7 @@
 #include "utility/Logging.hpp"
 
 #include "VR.hpp"
+#include "vr/AFWFrameResourcesBridge.hpp"
 
 #include <safetyhook.hpp>
 
@@ -65,15 +66,29 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         InParameters->Get(NVSDK_NGX_Parameter_Output, &output);
         InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &vr->mvScale[0]);
         InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &vr->mvScale[1]);
-        vr->rawDepthTex = depth;
-        vr->rawMotionVectorsTex = motionVectors;
-        EyeIndex nEye = (vr->get_render_frame_count() % 2 == 0) ? EyeLeft : EyeRight;
-        if (vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture) {
-            TextureDesc src;
-            src.pTexture = depth;
-            vr->d3d12Renderer->Copy(InCmdList, vr->depthDesc[nEye], src);
-            src.pTexture = motionVectors;
-            vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], src);
+        // When the modular frame-resource provider is enabled (UEVR_AFW_FRAME_RESOURCES=1) we want AFW
+        // to use OUR depth/velocity + reconstruct-from-depth combine, NOT the buffers DLSS happens to be
+        // evaluating with. Grabbing them here (and pre-copying into depthDesc/mvDesc) would set
+        // rawDepthTex first, so on_frame's provider path is skipped (!rawDepthTex is false) and the combine
+        // never runs -> AFW silently "borrows" DLSS's motion vectors on DLSS builds. Skip the hijack so the
+        // provider+combine owns depth/MV on every build, with or without DLSS. mvScale above is still read
+        // as a harmless fallback. See D3D12Component::on_frame + combine_ue_velocity_for_afw.
+        // Hijack DLSS's depth/MV into AFW's buffers when EITHER (a) the provider bridge is off (so AFW still
+        // has motion vectors on a DLSS build without the combine), OR (b) the A/B compare toggle is on, which
+        // requests the DLSS reference instead of our reconstruction. In case (b) on_frame skips the provider
+        // copies + combine so the DLSS data we copy here survives to the warp. Flip m_afw_use_dlss_source live
+        // to switch between DLSS's ground-truth depth/MV and ours.
+        if (!uevr_afw_bridge::enabled() || vr->afw_use_dlss_source()) {
+            vr->rawDepthTex = depth;
+            vr->rawMotionVectorsTex = motionVectors;
+            EyeIndex nEye = (vr->get_render_frame_count() % 2 == 0) ? EyeLeft : EyeRight;
+            if (vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture) {
+                TextureDesc src;
+                src.pTexture = depth;
+                vr->d3d12Renderer->Copy(InCmdList, vr->depthDesc[nEye], src);
+                src.pTexture = motionVectors;
+                vr->d3d12Renderer->Copy(InCmdList, vr->motionVectorsDesc[nEye], src);
+            }
         }
     }
     auto result = NVSDK_NGX_D3D12_EvaluateFeature_Hook.call<NVSDK_NGX_Result>(InCmdList, InFeatureHandle, InParameters, InCallback);
@@ -2683,6 +2698,23 @@ void VR::on_draw_sidebar_entry(std::string_view name) {
     if (selected_page == PAGE_UNREAL) {
         m_rendering_method->draw("Rendering Method");
         m_synced_afr_method->draw("Synced Sequential Method");
+
+        // Alternate Frame Warping controls. These were previously only reachable via the numpad
+        // (NUMPAD5 = mode, NUMPAD6 = debug, NUMPAD7 = clear), which is unusable on keyboards without a
+        // numpad. Surface them in the menu so the PDAFW debug overlay can actually be toggled.
+        ImGui::SetNextItemOpen(true, ImGuiCond_::ImGuiCond_Once);
+        if (ImGui::TreeNode("Alternate Frame Warping")) {
+            m_framewarp_mode->draw("Framewarp Mode");
+            m_framewarp_debug->draw("Debug Visualization (PDAFW)");
+            m_afw_debug_view->draw("Debug Buffer View");
+            m_afw_mv_scale->draw("Warp Strength (MV scale)");
+            m_afw_combine_transpose->draw("Transpose Warp Matrix");
+            m_afw_force_reconstruct->draw("Force Camera-Only Reconstruct");
+            m_afw_use_dlss_source->draw("Compare: Use DLSS Depth/MV");
+            m_clear_before_framewarp->draw("Clear Before Warping");
+            m_ignore_motion_threshold->draw("Ignore Motion Threshold");
+            ImGui::TreePop();
+        }
 
         m_world_scale->draw("World Scale");
         m_depth_scale->draw("Depth Scale");

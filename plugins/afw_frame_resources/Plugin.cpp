@@ -158,6 +158,41 @@ class FrameResourcesPlugin : public uevr::Plugin {
 public:
     FrameResourcesPlugin() = default;
 
+    // (Re)initialize the tracker + install the D3D12 providers on the CURRENT renderer device. Safe to
+    // call again after a device reset (the providers were torn down by on_device_reset). Returns false if
+    // the renderer device isn't a ready D3D12 device yet (caller should retry next frame).
+    bool install_d3d12_providers() {
+        auto& api = uevr::API::get();
+        const auto* renderer = api->param()->renderer;
+        if (renderer == nullptr || renderer->renderer_type != UEVR_RENDERER_D3D12 || renderer->device == nullptr) {
+            return false;
+        }
+        auto* device = static_cast<ID3D12Device*>(renderer->device);
+        auto* queue = static_cast<ID3D12CommandQueue*>(renderer->command_queue);
+
+        auto& tracker = afw_fr::FrameResourceTracker::get();
+        tracker.initialize(device, queue);
+
+        afw_fr::TrackerOptions opts = tracker.options();
+        opts.enable_render_target_pool = m_config.enable_rtpool;
+        opts.enable_d3d12_bind = m_config.enable_d3d12bind;
+        opts.enable_dlss_observer = m_config.enable_dlss_observer;
+        opts.log_level = static_cast<afw_fr::LogLevel>(m_config.log_level);
+        opts.max_stale_frames = m_config.max_stale_frames;
+        tracker.set_options(opts);
+
+        if (m_config.enable_rtpool) {
+            m_rtpool.activate();
+        }
+        if (m_config.enable_d3d12bind) {
+            m_d3d12bind.install(device);
+        }
+        if (m_config.enable_dlss_observer) {
+            m_ngx.try_enable();
+        }
+        return true;
+    }
+
     void on_initialize() override {
         afw_fr::set_log_sink(&plugin_log_sink);
 
@@ -173,30 +208,7 @@ public:
         const auto* renderer = api->param()->renderer;
         const bool ngx_present = afw_fr::NgxDlssProvider::ngx_present();
 
-        auto& tracker = afw_fr::FrameResourceTracker::get();
-
-        if (renderer != nullptr && renderer->renderer_type == UEVR_RENDERER_D3D12 && renderer->device != nullptr) {
-            auto* device = static_cast<ID3D12Device*>(renderer->device);
-            auto* queue = static_cast<ID3D12CommandQueue*>(renderer->command_queue);
-            tracker.initialize(device, queue);
-
-            afw_fr::TrackerOptions opts = tracker.options();
-            opts.enable_render_target_pool = m_config.enable_rtpool;
-            opts.enable_d3d12_bind = m_config.enable_d3d12bind;
-            opts.enable_dlss_observer = m_config.enable_dlss_observer;
-            opts.log_level = static_cast<afw_fr::LogLevel>(m_config.log_level);
-            opts.max_stale_frames = m_config.max_stale_frames;
-            tracker.set_options(opts);
-
-            if (m_config.enable_rtpool) {
-                m_rtpool.activate();
-            }
-            if (m_config.enable_d3d12bind) {
-                m_d3d12bind.install(device);
-            }
-            if (m_config.enable_dlss_observer) {
-                m_ngx.try_enable();
-            }
+        if (install_d3d12_providers()) {
             if (m_config.force_velocity) {
                 m_force_velocity_pending = true;
                 afw_fr::log_info("force_velocity: deferred until engine tick");
@@ -244,6 +256,14 @@ public:
         if (!m_config.master) {
             return;
         }
+        if (m_reinstall_pending) {
+            if (install_d3d12_providers()) {
+                m_reinstall_pending = false;
+                afw_fr::log_info("device reset: providers re-installed on current device");
+            } else {
+                return; // device not ready yet; retry next present
+            }
+        }
         auto& tracker = afw_fr::FrameResourceTracker::get();
         if (!tracker.is_available()) {
             return;
@@ -270,7 +290,11 @@ public:
         // Re-arm the once-only discovery logs so the post-reset device re-reports what it finds.
         afw_fr::reset_log_once();
         m_frame = 0;
-        afw_fr::log_info("device reset: providers torn down, tracker reset");
+        // The providers were torn down above; re-install them on the new device on the next present
+        // (the renderer's device pointer may not be valid yet at reset time). Without this, depth/velocity
+        // discovery permanently stops after the first device reset (e.g. swapchain resize on level load).
+        m_reinstall_pending = true;
+        afw_fr::log_info("device reset: providers torn down, will re-install next frame");
     }
 
 private:
@@ -340,6 +364,7 @@ private:
     uint32_t m_frame{0};
     bool m_force_velocity_pending{false};
     bool m_force_rdg_pool_pending{false};
+    bool m_reinstall_pending{false};
     afw_fr::RenderTargetPoolProvider m_rtpool;
     afw_fr::D3D12BindProvider m_d3d12bind;
     afw_fr::NgxDlssProvider m_ngx;

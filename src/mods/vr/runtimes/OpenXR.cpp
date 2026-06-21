@@ -1917,4 +1917,37 @@ XrResult OpenXR::end_frame(const std::vector<XrCompositionLayerBaseHeader*>& qua
 
     return result;
 }
+
+bool OpenXR::recover_wedged_frame(const char* reason) {
+    // try_lock: if the render thread is inside begin_frame/end_frame (which both hold sync_mtx around the
+    // xrBeginFrame/xrEndFrame calls), bail — it owns the frame and we must not issue a concurrent call.
+    std::unique_lock<std::recursive_mutex> lock(this->sync_mtx, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return false;
+    }
+
+    if (this->session == XR_NULL_HANDLE || !this->frame_began) {
+        return false;
+    }
+
+    // Submit an empty frame (no layers) to close the begun-but-stuck frame so the runtime's frame pacing
+    // can advance and the wedged render thread can proceed to its next frame.
+    XrFrameEndInfo frame_end_info{XR_TYPE_FRAME_END_INFO};
+    frame_end_info.displayTime = this->frame_state.predictedDisplayTime;
+    frame_end_info.environmentBlendMode = this->blend_mode;
+    frame_end_info.layerCount = 0;
+    frame_end_info.layers = nullptr;
+
+    const auto result = xrEndFrame(this->session, &frame_end_info);
+    if (result == XR_SUCCESS) {
+        this->ever_submitted = true;
+        spdlog::warn("[OpenXR] Recovered wedged frame with empty xrEndFrame ({})", reason);
+    } else {
+        spdlog::error("[OpenXR] Recovery xrEndFrame failed ({}): {}", reason, this->get_result_string(result));
+    }
+
+    this->frame_began = false;
+    this->frame_synced = false;
+    return result == XR_SUCCESS;
+}
 }
