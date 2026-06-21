@@ -59,6 +59,8 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCommandList* I
 #define NVSDK_NGX_Parameter_Output "Output"
 #define NVSDK_NGX_Parameter_MV_Scale_X "MV.Scale.X"
 #define NVSDK_NGX_Parameter_MV_Scale_Y "MV.Scale.Y"
+#define NVSDK_NGX_Parameter_Jitter_Offset_X "Jitter.Offset.X"
+#define NVSDK_NGX_Parameter_Jitter_Offset_Y "Jitter.Offset.Y"
 
 
 

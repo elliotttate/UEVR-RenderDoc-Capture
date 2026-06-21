@@ -41,13 +41,12 @@ public:
     TextureDesc motionVectorsDesc[2]{{}, {}};
 
     float mvScale[2] = {1.0, 1.0};
+    float jitterOffset[2] = {1.0, 1.0};
 
     bool mDebug1 = false;
     bool mDebug2 = false;
     bool mDebug3 = false;
     int mDebug5 = 0;
-
-    uint32_t render_size[2] = {0, 0};
 
     std::map<NVSDK_NGX_Handle*, NVSDK_NGX_Feature> vrDLSSHandleMap;
 

@@ -64,6 +64,8 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         InParameters->Get(NVSDK_NGX_Parameter_Output, &output);
         InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &vr->mvScale[0]);
         InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &vr->mvScale[1]);
+        InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &vr->jitterOffset[0]);
+        InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &vr->jitterOffset[1]);
         vr->rawDepthTex = depth;
         vr->rawMotionVectorsTex = motionVectors;
         auto render_frame_count = vr->get_render_frame_count();
@@ -2234,6 +2236,10 @@ void VR::update_camera_data(int frame_count) {
         cameraData[nEye].destViewToWorldMatrix = glm::inverse(cameraData[nEye].destWorldToViewMatrix);
         cameraData[nEye].srcViewToWorldMatrix = glm::inverse(cameraData[nEye].srcWorldToViewMatrix);
 
+        float x = jitterOffset[0] / get_hmd_width();
+        float y = jitterOffset[1] / get_hmd_height();
+        render_projection_matrix[nEye].curr[2][0] += x;
+        render_projection_matrix[nEye].curr[2][1] += y;
         cameraData[nEye].destViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].other);
         cameraData[nEye].srcViewToClipMatrix = to_reverseZ(render_projection_matrix[nEye].curr);
         cameraData[nEye].destClipToViewMatrix = glm::inverse(cameraData[nEye].destViewToClipMatrix);
