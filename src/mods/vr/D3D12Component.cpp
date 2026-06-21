@@ -578,7 +578,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
             }
 
             if (is_using_afw) {
-                m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_RIGHT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_RENDER_TARGET, &src_box);
+                m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_RIGHT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, &src_box);
                 if (scene_depth_tex != nullptr) {
                     m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_DEPTH_RIGHT_EYE, otherEyeFrameBuffer.depth.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr);
                 }
@@ -612,7 +612,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                 return e;
             }
             if (is_using_afw) {
-                m_openvr.copy_left_to_right(otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                m_openvr.copy_left_to_right(otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 
                 vr::D3D12TextureData_t right {
                     m_openvr.get_right().texture.Get(),
@@ -708,7 +708,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
                         .right = vr->is_extreme_compatibility_mode_enabled() ? m_backbuffer_size[0] : m_backbuffer_size[0] / 2,
                         .bottom = m_backbuffer_size[1],
                         .back = 1};
-                    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_LEFT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_RENDER_TARGET, &src_box2);
+                    m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_LEFT_EYE, otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, &src_box2);
                     if (scene_depth_tex != nullptr) {
                         m_openxr.copy((uint32_t)runtimes::OpenXR::SwapchainIndex::AFR_DEPTH_LEFT_EYE, otherEyeFrameBuffer.depth.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE, nullptr);
                     }
@@ -735,7 +735,7 @@ vr::EVRCompositorError D3D12Component::on_frame(VR* vr) {
 
             if (!is_afr || is_using_afw) {
                 if (is_using_afw)
-                    m_openvr.copy_left_to_right(otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    m_openvr.copy_left(otherEyeFrameBuffer.color.pTexture, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
                 else
                     m_openvr.copy_left(backbuffer.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
 

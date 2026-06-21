@@ -75,7 +75,11 @@ NVSDK_NGX_Result hk_NVSDK_NGX_D3D12_EvaluateFeature(
         vr->rawMotionVectorsTex = motionVectors;
         auto render_frame_count = vr->get_render_frame_count();
         EyeIndex nEye = (render_frame_count % 2 == 0) ? EyeLeft : EyeRight;
-        if (vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture) {
+        static int lastPausedFrame = render_frame_count;
+        bool bufferValid = vr->is_hmd_active() && motionVectors && vr->motionVectorsDesc[nEye].pTexture && vr->depthDesc[nEye].pTexture;
+        if (!bufferValid)
+            lastPausedFrame = render_frame_count;
+        if ((render_frame_count - lastPausedFrame > 30) && bufferValid) {
             TextureDesc src;
             src.pTexture = depth;
             vr->d3d12Renderer->Copy(InCmdList, vr->depthDesc[nEye], src);
