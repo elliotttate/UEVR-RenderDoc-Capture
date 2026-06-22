@@ -59,9 +59,9 @@ endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# UESDK is a PRIVATE submodule (praydog's SDK) so it can't be forked publicly to
-# carry the embedded-RenderDoc crash fix. Apply it to the builder's own checkout
-# before UESDK is added/compiled. Idempotent; warns (never fails) on drift.
+# Apply the AFW/embedded-RenderDoc fixes to the builder's own UESDK checkout at
+# configure time, before UESDK is compiled. Idempotent: no-ops if already
+# applied. Must run before add_subdirectory.
 include(cmake/ApplyUESDKPatch.cmake)
 
 add_subdirectory(dependencies/submodules/UESDK)
@@ -83,12 +83,12 @@ FetchContent_Declare(bddisasm
 )
 FetchContent_MakeAvailable(bddisasm)
 
-message(STATUS "Fetching kananlib (7a99a94cea3dbcbd46b54885bd3d04f1d242e21a)...")
+message(STATUS "Fetching kananlib (49fdf2d3b1db350e370beacb607d5721bc2911ad)...")
 FetchContent_Declare(kananlib
 	GIT_REPOSITORY
 		"https://github.com/cursey/kananlib"
 	GIT_TAG
-		7a99a94cea3dbcbd46b54885bd3d04f1d242e21a
+		49fdf2d3b1db350e370beacb607d5721bc2911ad
 )
 FetchContent_MakeAvailable(kananlib)
 
@@ -468,6 +468,98 @@ target_link_libraries(example_plugin PUBLIC
 unset(CMKR_TARGET)
 unset(CMKR_SOURCES)
 
+# Target afw_frame_resources
+set(CMKR_TARGET afw_frame_resources)
+set(afw_frame_resources_SOURCES "")
+
+list(APPEND afw_frame_resources_SOURCES
+	"plugins/afw_frame_resources/FrameResourceLog.cpp"
+	"plugins/afw_frame_resources/FrameResourceTracker.cpp"
+	"plugins/afw_frame_resources/Plugin.cpp"
+	"plugins/afw_frame_resources/providers/D3D12BindProvider.cpp"
+	"plugins/afw_frame_resources/providers/NgxDlssProvider.cpp"
+	"plugins/afw_frame_resources/providers/RenderTargetPoolProvider.cpp"
+	"plugins/afw_frame_resources/FrameResourceLog.hpp"
+	"plugins/afw_frame_resources/FrameResourceTracker.hpp"
+	"plugins/afw_frame_resources/FrameResourceTypes.hpp"
+	"plugins/afw_frame_resources/providers/D3D12BindProvider.hpp"
+	"plugins/afw_frame_resources/providers/NgxDlssProvider.hpp"
+	"plugins/afw_frame_resources/providers/PooledRenderTargetLayout.hpp"
+	"plugins/afw_frame_resources/providers/RenderTargetPoolProvider.hpp"
+	"plugins/afw_frame_resources/include/UEVRFrameResourcesAPI.h"
+)
+
+list(APPEND afw_frame_resources_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${afw_frame_resources_SOURCES})
+add_library(afw_frame_resources SHARED)
+
+if(afw_frame_resources_SOURCES)
+	target_sources(afw_frame_resources PRIVATE ${afw_frame_resources_SOURCES})
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${afw_frame_resources_SOURCES})
+
+target_compile_features(afw_frame_resources PUBLIC
+	cxx_std_23
+)
+
+target_include_directories(afw_frame_resources PUBLIC
+	"include/"
+	"examples/renderlib"
+)
+
+target_link_libraries(afw_frame_resources PUBLIC
+	plugin_renderlib
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
+# Target afw_frame_resources_selftest
+set(CMKR_TARGET afw_frame_resources_selftest)
+set(afw_frame_resources_selftest_SOURCES "")
+
+list(APPEND afw_frame_resources_selftest_SOURCES
+	"plugins/afw_frame_resources/FrameResourceTracker.cpp"
+	"plugins/afw_frame_resources/FrameResourceLog.cpp"
+	"plugins/afw_frame_resources/tools/selftest_main.cpp"
+	"plugins/afw_frame_resources/FrameResourceTracker.hpp"
+	"plugins/afw_frame_resources/FrameResourceTypes.hpp"
+	"plugins/afw_frame_resources/FrameResourceLog.hpp"
+)
+
+list(APPEND afw_frame_resources_selftest_SOURCES
+	cmake.toml
+)
+
+set(CMKR_SOURCES ${afw_frame_resources_selftest_SOURCES})
+add_executable(afw_frame_resources_selftest)
+
+if(afw_frame_resources_selftest_SOURCES)
+	target_sources(afw_frame_resources_selftest PRIVATE ${afw_frame_resources_selftest_SOURCES})
+endif()
+
+get_directory_property(CMKR_VS_STARTUP_PROJECT DIRECTORY ${PROJECT_SOURCE_DIR} DEFINITION VS_STARTUP_PROJECT)
+if(NOT CMKR_VS_STARTUP_PROJECT)
+	set_property(DIRECTORY ${PROJECT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT afw_frame_resources_selftest)
+endif()
+
+source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${afw_frame_resources_selftest_SOURCES})
+
+target_compile_features(afw_frame_resources_selftest PRIVATE
+	cxx_std_23
+)
+
+target_include_directories(afw_frame_resources_selftest PRIVATE
+	"plugins/afw_frame_resources"
+)
+
+unset(CMKR_TARGET)
+unset(CMKR_SOURCES)
+
 # Target sdk-test
 set(CMKR_TARGET sdk-test)
 set(sdk-test_SOURCES "")
@@ -790,6 +882,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/pluginloader/FUObjectArrayFunctions.cpp"
 	"src/mods/pluginloader/UScriptStructFunctions.cpp"
 	"src/mods/uobjecthook/SDKDumper.cpp"
+	"src/mods/vr/AFWFrameResourcesBridge.cpp"
 	"src/mods/vr/Bindings.cpp"
 	"src/mods/vr/CVarManager.cpp"
 	"src/mods/vr/D3D11Component.cpp"
@@ -837,6 +930,7 @@ list(APPEND uevr_SOURCES
 	"src/mods/pluginloader/FUObjectArrayFunctions.hpp"
 	"src/mods/pluginloader/UScriptStructFunctions.hpp"
 	"src/mods/uobjecthook/SDKDumper.hpp"
+	"src/mods/vr/AFWFrameResourcesBridge.hpp"
 	"src/mods/vr/CVarManager.hpp"
 	"src/mods/vr/D3D11Component.hpp"
 	"src/mods/vr/D3D12Component.hpp"
@@ -893,6 +987,7 @@ target_include_directories(uevr PUBLIC
 	"shared/"
 	"src/"
 	"include/"
+	"plugins/afw_frame_resources/include"
 	"${OPENXR_SOURCE_DIR}/src"
 	"dependencies/vendor/renderdoc"
 )

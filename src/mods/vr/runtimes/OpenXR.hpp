@@ -82,6 +82,15 @@ struct OpenXR final : public VRRuntime {
 
         return VRRuntime::Error::SUCCESS;
     }
+    // Cross-thread wedge recovery (ported from UEVRJ recover_wedged_frame). Under embedded RenderDoc the
+    // render thread can call xrBeginFrame then block before xrEndFrame (frame_began=true,
+    // ever_submitted=false), wedging the session in READY so it never submits -> VR/AFW never come up.
+    // Force-close the begun frame with an empty xrEndFrame so the runtime frame loop can advance. Safe to
+    // call from the hook-monitor thread: it try_locks sync_mtx, which begin_frame/end_frame hold for the
+    // whole xrBeginFrame/xrEndFrame, so it can never issue a concurrent frame call. Returns true if it
+    // submitted the empty frame.
+    bool recover_wedged_frame(const char* reason);
+
     VRRuntime::Error update_poses(bool from_view_extensions = false, uint32_t frame_count = 0) override;
     VRRuntime::Error update_render_target_size() override;
     uint32_t get_width() const override;

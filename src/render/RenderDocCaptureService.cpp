@@ -369,6 +369,21 @@ bool is_api_loaded() {
 }
 
 bool refresh_hooks() {
+    // Diagnostic/escape hatch: RENDERDOC_UEVR_RefreshHooks re-applies RenderDoc's import-table hooks to
+    // ALL loaded modules — including UEVRBackend's imports of VirtualAlloc/VirtualProtect/etc. That routes
+    // safetyhook's trampoline allocation/protection through RenderDoc, which can hang UEVR's runtime
+    // hook installs (observed: render thread stuck in safetyhook::MidHook::setup under capture). Set
+    // UEVR_RENDERDOC_NO_REFRESH_HOOKS=1 to skip the refresh; RenderDoc still wraps the game's own device
+    // (it hooks D3D12CreateDevice at load), so live capture of the game's frames still works.
+    if (env_truthy_w(L"UEVR_RENDERDOC_NO_REFRESH_HOOKS")) {
+        static bool s_logged_skip = false;
+        if (!s_logged_skip) {
+            s_logged_skip = true;
+            spdlog::info("[RenderDoc] hook refresh skipped (UEVR_RENDERDOC_NO_REFRESH_HOOKS=1)");
+        }
+        return false;
+    }
+
     RenderDocRefreshHooksFn refresh{};
 
     {

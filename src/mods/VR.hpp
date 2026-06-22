@@ -463,8 +463,14 @@ public:
                (m_extreme_compat_mode->value() && m_rendering_method->value() == RenderingMethod::NATIVE_STEREO);
     }
 
-    bool is_using_afw() const { return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP; }
+    bool is_using_afw() const {
+        return m_rendering_method->value() == RenderingMethod::ALTERNATE_FRAMEWARP;
+    }
 
+    // A/B compare toggle (public so the free NGX hook can read it): feed AFW DLSS's depth/MV reference.
+    bool afw_use_dlss_source() const {
+        return m_afw_use_dlss_source->value();
+    }
 
     SynchronizeStage get_synchronize_stage() {
         return (SynchronizeStage) m_sync_mode->value();
@@ -971,6 +977,39 @@ private:
         (int)FrameWarpMode::CombinedWarping)
     };
 
+    // AFW debug buffer visualizer: false-colors the depth / motion vectors AFW consumes over the eye.
+    const ModCombo::Ptr m_afw_debug_view{ModCombo::create(generate_name("AFWDebugView"),
+        {
+            "Off",
+            "Motion Vectors (combined)",
+            "Motion Vectors (combined, boosted)",
+            "Depth",
+            "Per-Object Velocity Direction",
+            "Per-Object Velocity X",
+            "Per-Object Velocity Y",
+            "Per-Object Velocity Magnitude",
+            "Per-Object Velocity Validity",
+            "Source Velocity Z (depth motion)",
+            "Combined Velocity Z (depth motion)"
+        },
+        0)
+    };
+    // AFW reconstructed-velocity warp strength. The combine produces dense camera-motion vectors from
+    // depth; this scales how far AFW reprojects with them. 1.0 = full. Lower it to remove over-warp
+    // ghosting under fast head motion (AFW alternates eyes, so the per-eye 2-frame ClipToPrevClip can
+    // over-shift). 0 = no reconstructed warp. Overridden by env UEVR_AFW_MV_SCALE when set.
+    const ModSlider::Ptr m_afw_mv_scale{ModSlider::create(generate_name("AFWMotionVectorScale"), 0.0f, 2.0f, 1.0f)};
+    // Transpose the reconstructed ClipToPrevClip matrix (UE vs glm/HLSL handedness). Live toggle to
+    // confirm the correct warp convention without rebuilding.
+    const ModToggle::Ptr m_afw_combine_transpose{ModToggle::create(generate_name("AFWCombineTranspose"), false)};
+    // Off (default) = hybrid: per-object engine velocity for moving objects + reconstructed camera motion
+    // for static geometry. On = reconstruct camera motion everywhere (moving objects ghost).
+    const ModToggle::Ptr m_afw_force_reconstruct{ModToggle::create(generate_name("AFWForceReconstruct"), false)};
+    // A/B reference toggle (DLSS builds only): ON = feed AFW the depth + motion vectors DLSS itself uses
+    // (the engine's ground-truth dense MV, captured in the NGX hook) instead of our reconstructed combine.
+    // OFF = our version. Lets us flip between the two live to converge ours onto DLSS's. No-op without DLSS.
+    const ModToggle::Ptr m_afw_use_dlss_source{ModToggle::create(generate_name("AFWUseDLSSSource"), false)};
+
     // Snap turn settings and globals
     void gamepad_snapturn(XINPUT_STATE& state);
     void process_snapturn();
@@ -1166,6 +1205,11 @@ public:
             *m_sync_mode,
             *m_enable_ui_fix,
             *m_framewarp_mode,
+            *m_afw_debug_view,
+            *m_afw_mv_scale,
+            *m_afw_combine_transpose,
+            *m_afw_force_reconstruct,
+            *m_afw_use_dlss_source,
             *m_enable_sharpening,
             *m_sharpness,
             *m_fix_object_motion_vector,

@@ -61,6 +61,21 @@ private:
     void draw_spectator_view(ID3D12GraphicsCommandList* command_list, bool is_right_eye_frame);
     void clear_backbuffer();
 
+    // AFW UE velocity combine: reconstruct dense camera-motion motion vectors from the depth buffer.
+    bool setup_velocity_combine_pipeline(ID3D12Device* device);
+    bool combine_ue_velocity_for_afw(
+        VR* vr,
+        ID3D12GraphicsCommandList* command_list,
+        TextureDesc& raw_velocity_desc,
+        TextureDesc& depth_desc,
+        TextureDesc& output_desc,
+        EyeIndex eye);
+
+    // AFW debug buffer visualizer (depth / motion vectors false-color), blitted over the submitted eye.
+    bool setup_debug_view_pipeline(ID3D12Device* device);
+    void render_debug_view(VR* vr, ID3D12GraphicsCommandList* command_list, int view_mode, EyeIndex eye,
+                           TextureDesc& backbuffer_dst, TextureDesc* other_eye_dst = nullptr);
+
     template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
     ComPtr<ID3D12Resource> m_prev_backbuffer{};
@@ -79,6 +94,20 @@ private:
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_backbuffer_batch{};
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_game_batch{};
     std::unique_ptr<DirectX::DX12::SpriteBatch> m_ui_batch_alpha_invert{};
+
+    // AFW UE velocity combine pipeline + per-eye raw velocity SRV descriptors.
+    ComPtr<ID3D12RootSignature> m_velocity_combine_root_signature{};
+    ComPtr<ID3D12PipelineState> m_velocity_combine_pso{};
+    std::array<TextureDesc, 2> m_raw_velocity_desc{};
+    // Per-eye full 3D velocity (RGBA16F): .xy = combined screen motion (pixels), .z = depth motion
+    // V.z = DeviceZ - PrevDeviceZ. Second combine output (u1); motionVectorsDesc stays RG16F for PDAFW.
+    // For PureDark's 3D reprojection + the "combined Z" debug view.
+    std::array<TextureDesc, 2> m_combined_velocity_3d_desc{};
+
+    // AFW debug buffer visualizer pipeline + scratch false-color target.
+    ComPtr<ID3D12RootSignature> m_debug_view_root_signature{};
+    ComPtr<ID3D12PipelineState> m_debug_view_pso{};
+    TextureDesc m_debug_view_tex{};
 
     ID3D12Resource* m_last_checked_native{nullptr};
 

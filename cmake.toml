@@ -35,9 +35,9 @@ endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# UESDK is a PRIVATE submodule (praydog's SDK) so it can't be forked publicly to
-# carry the embedded-RenderDoc crash fix. Apply it to the builder's own checkout
-# before UESDK is added/compiled. Idempotent; warns (never fails) on drift.
+# Apply the AFW/embedded-RenderDoc fixes to the builder's own UESDK checkout at
+# configure time, before UESDK is compiled. Idempotent: no-ops if already
+# applied. Must run before add_subdirectory.
 include(cmake/ApplyUESDKPatch.cmake)
 
 add_subdirectory(dependencies/submodules/UESDK)
@@ -68,7 +68,7 @@ tag = "70db095765ab2066dd88dfb7bbcc42259ed167c5"
 
 [fetch-content.kananlib]
 git = "https://github.com/cursey/kananlib"
-tag = "7a99a94cea3dbcbd46b54885bd3d04f1d242e21a"
+tag = "49fdf2d3b1db350e370beacb607d5721bc2911ad"
 
 [fetch-content.safetyhook]
 git = "https://github.com/praydog/safetyhook"
@@ -175,6 +175,38 @@ type = "plugin"
 sources = ["examples/example_plugin/**.cpp", "examples/example_plugin/**.c"]
 headers = ["examples/example_plugin/**.hpp", "examples/example_plugin/**.h"]
 
+# AFW frame resource provider: decoupled depth/velocity discovery exposed through a
+# versioned C ABI. This plugin provides resources only; PureDark's AFW path remains
+# the consumer.
+[target.afw_frame_resources]
+type = "plugin"
+sources = [
+    "plugins/afw_frame_resources/*.cpp",
+    "plugins/afw_frame_resources/providers/*.cpp",
+]
+headers = [
+    "plugins/afw_frame_resources/*.hpp",
+    "plugins/afw_frame_resources/providers/*.hpp",
+    "plugins/afw_frame_resources/include/*.h",
+]
+
+# Offline self-test for the provider core. It links only the uevr-free tracker state
+# machine so it can run without launching a game.
+[target.afw_frame_resources_selftest]
+type = "executable"
+sources = [
+    "plugins/afw_frame_resources/FrameResourceTracker.cpp",
+    "plugins/afw_frame_resources/FrameResourceLog.cpp",
+    "plugins/afw_frame_resources/tools/selftest_main.cpp",
+]
+headers = [
+    "plugins/afw_frame_resources/FrameResourceTracker.hpp",
+    "plugins/afw_frame_resources/FrameResourceTypes.hpp",
+    "plugins/afw_frame_resources/FrameResourceLog.hpp",
+]
+include-directories = ["plugins/afw_frame_resources"]
+compile-features = ["cxx_std_23"]
+
 [target.sdk-test]
 type = "shared"
 sources = ["side-projects/sdk-test/**.cpp", "side-projects/sdk-test/**.c"]
@@ -254,6 +286,7 @@ include-directories = [
     "shared/",
     "src/",
     "include/",
+    "plugins/afw_frame_resources/include",
     "${OPENXR_SOURCE_DIR}/src",
     "dependencies/vendor/renderdoc"
 ]
@@ -277,7 +310,7 @@ link-libraries = [
     "sdkgenny",
     "asmjit",
     "luavrlib",
-	"pdafwmod"
+    "pdafwmod"
 ]
 
 [template.ue4template.properties]
